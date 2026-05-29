@@ -6,6 +6,33 @@ import os
 import uuid
 import urllib.parse
 from http.cookies import SimpleCookie
+import base64
+import hmac
+import hashlib
+import struct
+import time
+import random
+
+def generate_totp_secret():
+    """Generate a random 32-character Base32 secret."""
+    return base64.b32encode(os.urandom(20)).decode('utf-8')
+
+def verify_totp(secret: str, code: str, window: int = 1) -> bool:
+    """Verify a TOTP code with a given time window."""
+    try:
+        key = base64.b32decode(secret, True)
+    except:
+        return False
+    
+    current_time = int(time.time()) // 30
+    for i in range(-window, window + 1):
+        msg = struct.pack(">Q", current_time + i)
+        h = hmac.new(key, msg, hashlib.sha1).digest()
+        o = h[19] & 15
+        h = (struct.unpack(">I", h[o:o+4])[0] & 0x7fffffff) % 1000000
+        if f"{h:06d}" == code:
+            return True
+    return False
 
 PORT = 8000
 DB_FILE = 'db.sqlite'
@@ -18,9 +45,14 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             phone TEXT UNIQUE,
-            session_token TEXT
+            session_token TEXT,
+            totp_secret TEXT
         )
     ''')
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN totp_secret TEXT')
+    except sqlite3.OperationalError:
+        pass # Column already exists
     c.execute('''
         CREATE TABLE IF NOT EXISTS wallets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,9 +108,40 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self.path == '/api/auth/send-code':
             phone = data.get('phone')
             if phone:
-                # Mock sending code via Telegram Gateway
-                print(f"MOCK: Sent verification code 12345 to {phone} via Telegram Gateway")
-                self.send_json({'success': True, 'message': 'Code sent via Telegram'})
+                conn = sqlite3.connect(DB_FILE)
+                c = conn.cursor()
+                c.execute('SELECT totp_secret FROM users WHERE phone = ?', (phone,))
+                user = c.fetchone()
+                
+                is_new_user = False
+                totp_secret = None
+                
+                if not user:
+                    totp_secret = generate_totp_secret()
+                    c.execute('INSERT INTO users (phone, totp_secret) VALUES (?, ?)', (phone, totp_secret))
+                    is_new_user = True
+                elif not user[0]:
+                    totp_secret = generate_totp_secret()
+                    c.execute('UPDATE users SET totp_secret = ? WHERE phone = ?', (totp_secret, phone))
+                    is_new_user = True
+                else:
+                    totp_secret = user[0]
+                    
+                conn.commit()
+                conn.close()
+                
+                response_data = {'success': True}
+                if is_new_user:
+                    # Provide provisioning URI for QR code generation on the client
+                    app_name = urllib.parse.quote("Tradernet Dashboard")
+                    phone_encoded = urllib.parse.quote(phone)
+                    uri = f"otpauth://totp/{app_name}:{phone_encoded}?secret={totp_secret}&issuer={app_name}"
+                    response_data['setupRequired'] = True
+                    response_data['setupUri'] = uri
+                else:
+                    response_data['setupRequired'] = False
+                    
+                self.send_json(response_data)
             else:
                 self.send_json({'error': 'Phone number required'}, 400)
                 
@@ -86,17 +149,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             phone = data.get('phone')
             code = data.get('code')
             
-            if code == '12345': # Mock verification
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                c.execute('SELECT id FROM users WHERE phone = ?', (phone,))
-                user = c.fetchone()
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute('SELECT id, totp_secret FROM users WHERE phone = ?', (phone,))
+            user = c.fetchone()
+            
+            if user and user[1] and verify_totp(user[1], code):
                 session_token = str(uuid.uuid4())
-                
-                if not user:
-                    c.execute('INSERT INTO users (phone, session_token) VALUES (?, ?)', (phone, session_token))
-                else:
-                    c.execute('UPDATE users SET session_token = ? WHERE phone = ?', (session_token, phone))
+                c.execute('UPDATE users SET session_token = ? WHERE phone = ?', (session_token, phone))
                 conn.commit()
                 conn.close()
                 
@@ -112,6 +172,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': True}).encode())
             else:
+                conn.close()
                 self.send_json({'error': 'Invalid code'}, 400)
                 
         elif self.path == '/api/wallets':

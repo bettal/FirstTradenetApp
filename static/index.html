@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Tradernet Dashboard - Login</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -11,10 +12,11 @@
         <div class="glass-panel auth-card">
             <div style="text-align: center; margin-bottom: 2rem;">
                 <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom: 1rem;">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom: 1rem;">
                     <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
                 </svg>
                 <h2>Welcome Back</h2>
-                <p>Login securely with Telegram 2FA</p>
+                <p>Login securely with Authenticator 2FA</p>
             </div>
 
             <div id="step-phone">
@@ -23,19 +25,24 @@
                         <label for="phone">Phone Number</label>
                         <input type="tel" id="phone" placeholder="+1 234 567 8900" required>
                     </div>
-                    <button type="submit">Send Code via Telegram</button>
+                    <button type="submit">Continue</button>
                     <div id="phone-error" class="error-message hidden"></div>
                 </form>
             </div>
 
             <div id="step-code" class="hidden">
                 <form id="code-form">
-                    <p style="margin-bottom: 1rem; text-align: center; font-size: 0.875rem;">
-                        We've sent a code via the official Telegram Gateway. (Mock: use 12345)
+                    <div id="qr-container" class="hidden" style="text-align: center; margin-bottom: 1.5rem;">
+                        <h3 style="margin-bottom: 0.5rem; font-size: 1.1rem;">Setup 2FA</h3>
+                        <p style="margin-bottom: 1rem; font-size: 0.875rem;">Scan this QR code with Google Authenticator.</p>
+                        <div id="qrcode" style="display: inline-block; background: white; padding: 10px; border-radius: 8px;"></div>
+                    </div>
+                    <p id="code-instruction" style="margin-bottom: 1rem; text-align: center; font-size: 0.875rem;">
+                        Enter the 6-digit code from Google Authenticator.
                     </p>
                     <div class="form-group">
                         <label for="code">Verification Code</label>
-                        <input type="text" id="code" placeholder="Enter 5-digit code" required autocomplete="off">
+                        <input type="text" id="code" placeholder="Enter 6-digit code" required autocomplete="off" maxlength="6">
                     </div>
                     <button type="submit">Verify & Login</button>
                     <div id="code-error" class="error-message hidden"></div>

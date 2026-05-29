@@ -38,6 +38,28 @@ function initLogin() {
             if (res.ok) {
                 stepPhone.classList.add('hidden');
                 stepCode.classList.remove('hidden');
+                
+                const qrContainer = document.getElementById('qr-container');
+                const qrCodeDiv = document.getElementById('qrcode');
+                const instruction = document.getElementById('code-instruction');
+                
+                qrCodeDiv.innerHTML = ''; // Clear previous
+                
+                if (data.setupRequired && data.setupUri) {
+                    qrContainer.classList.remove('hidden');
+                    instruction.classList.add('hidden');
+                    new QRCode(qrCodeDiv, {
+                        text: data.setupUri,
+                        width: 150,
+                        height: 150,
+                        colorDark : "#000000",
+                        colorLight : "#ffffff",
+                        correctLevel : QRCode.CorrectLevel.M
+                    });
+                } else {
+                    qrContainer.classList.add('hidden');
+                    instruction.classList.remove('hidden');
+                }
             } else {
                 errorDiv.textContent = data.error || 'Failed to send code';
                 errorDiv.classList.remove('hidden');
