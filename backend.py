@@ -14,6 +14,7 @@ import hashlib
 import struct
 import time
 import random
+import bcrypt
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
@@ -21,8 +22,15 @@ from cryptography.hazmat.primitives import hashes
 IN_MEMORY_SESSIONS = {}
 
 def hash_password(password: str) -> str:
-    """Hash a password with SHA-256 for simplicity (in prod use bcrypt/argon2)."""
-    return hashlib.sha256(password.encode('utf-8')).hexdigest()
+    """Hash a password securely using bcrypt."""
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def check_password(password: str, hashed: str) -> bool:
+    """Verify a password against a bcrypt hash."""
+    try:
+        return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+    except ValueError:
+        return False
 
 def generate_totp_secret():
     """Generate a random 32-character Base32 secret."""
@@ -152,7 +160,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             user = c.fetchone()
             conn.close()
             
-            if user and user[1] == hash_password(password):
+            if user and check_password(password, user[1]):
                 salt = user[3]
                 if user[2] == 1:
                     # 2FA is enabled
@@ -178,7 +186,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             user = c.fetchone()
             conn.close()
             
-            if user and user[2] == 1 and user[3] == hash_password(password) and user[1] and verify_totp(user[1], code):
+            if user and user[2] == 1 and check_password(password, user[3]) and user[1] and verify_totp(user[1], code):
                 self._login_user(phone, password, user[4])
             else:
                 self.send_json({'error': 'Invalid code or password'}, 401)
