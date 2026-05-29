@@ -5,6 +5,8 @@ import json
 import os
 import uuid
 import urllib.parse
+import urllib.request
+import urllib.error
 from http.cookies import SimpleCookie
 import base64
 import hmac
@@ -225,11 +227,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             private_key = wallet[1]
 
             # Prepare Tradernet payload
-            import time
-            import hmac
-            import hashlib
-            import urllib.request
-            import urllib.error
 
             payload = {
                 "cmd": cmd,
