@@ -12,73 +12,79 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // --- Login Logic ---
 function initLogin() {
-    const phoneForm = document.getElementById('phone-form');
+    const authForm = document.getElementById('auth-form');
     const codeForm = document.getElementById('code-form');
-    const stepPhone = document.getElementById('step-phone');
-    const stepCode = document.getElementById('step-code');
+    const stepAuth = document.getElementById('step-auth');
+    const step2fa = document.getElementById('step-2fa');
     const btnBack = document.getElementById('btn-back');
-    const phoneInput = document.getElementById('phone');
+    const btnLogin = document.getElementById('btn-login');
+    const btnRegister = document.getElementById('btn-register');
     
-    if (!phoneForm) return;
+    if (!authForm) return;
 
-    phoneForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const phone = phoneInput.value;
-        const errorDiv = document.getElementById('phone-error');
+    async function handleAuth(action) {
+        const phone = document.getElementById('phone').value;
+        const password = document.getElementById('password').value;
+        const errorDiv = document.getElementById('auth-error');
         errorDiv.classList.add('hidden');
         
+        if (!phone || !password) {
+            errorDiv.textContent = 'Phone and password required';
+            errorDiv.classList.remove('hidden');
+            return;
+        }
+
+        const endpoint = action === 'login' ? '/api/auth/login' : '/api/auth/register';
+        
         try {
-            const res = await fetch('/api/auth/send-code', {
+            const res = await fetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ phone })
+                body: JSON.stringify({ phone, password })
             });
             const data = await res.json();
             
             if (res.ok) {
-                stepPhone.classList.add('hidden');
-                stepCode.classList.remove('hidden');
-                
-                const qrContainer = document.getElementById('qr-container');
-                const qrCodeDiv = document.getElementById('qrcode');
-                const instruction = document.getElementById('code-instruction');
-                
-                qrCodeDiv.innerHTML = ''; // Clear previous
-                
-                if (data.setupRequired && data.setupUri) {
-                    qrContainer.classList.remove('hidden');
-                    instruction.classList.add('hidden');
-                    new QRCode(qrCodeDiv, {
-                        text: data.setupUri,
-                        width: 150,
-                        height: 150,
-                        colorDark : "#000000",
-                        colorLight : "#ffffff",
-                        correctLevel : QRCode.CorrectLevel.M
-                    });
-                } else {
-                    qrContainer.classList.add('hidden');
-                    instruction.classList.remove('hidden');
+                if (action === 'register') {
+                    alert('Registration successful! You can now log in.');
+                    // Optionally clear password
+                } else if (action === 'login') {
+                    if (data.requires_2fa) {
+                        stepAuth.classList.add('hidden');
+                        step2fa.classList.remove('hidden');
+                    } else {
+                        window.location.href = '/dashboard';
+                    }
                 }
             } else {
-                errorDiv.textContent = data.error || 'Failed to send code';
+                errorDiv.textContent = data.error || `Failed to ${action}`;
                 errorDiv.classList.remove('hidden');
             }
         } catch (err) {
             errorDiv.textContent = 'Network error';
             errorDiv.classList.remove('hidden');
         }
+    }
+
+    btnLogin.addEventListener('click', (e) => {
+        e.preventDefault();
+        handleAuth('login');
+    });
+
+    btnRegister.addEventListener('click', (e) => {
+        e.preventDefault();
+        handleAuth('register');
     });
 
     codeForm.addEventListener('submit', async (e) => {
         e.preventDefault();
-        const phone = phoneInput.value;
+        const phone = document.getElementById('phone').value;
         const code = document.getElementById('code').value;
         const errorDiv = document.getElementById('code-error');
         errorDiv.classList.add('hidden');
         
         try {
-            const res = await fetch('/api/auth/verify-code', {
+            const res = await fetch('/api/auth/verify-2fa', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ phone, code })
@@ -98,8 +104,8 @@ function initLogin() {
     });
 
     btnBack.addEventListener('click', () => {
-        stepCode.classList.add('hidden');
-        stepPhone.classList.remove('hidden');
+        step2fa.classList.add('hidden');
+        stepAuth.classList.remove('hidden');
     });
 }
 
@@ -306,6 +312,98 @@ function initDashboard() {
         document.cookie = "session_token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
         window.location.href = '/';
     });
+
+    // --- Security Modal Logic ---
+    const securityModal = document.getElementById('security-modal');
+    const btnSecurity = document.getElementById('btn-security');
+    const btnCloseSecurity = document.getElementById('btn-close-security');
+    const btnSetup2fa = document.getElementById('btn-setup-2fa');
+    const securityIdle = document.getElementById('security-idle');
+    const securitySetup = document.getElementById('security-setup');
+    const confirm2faForm = document.getElementById('confirm-2fa-form');
+    const qrCodeDiv = document.getElementById('dashboard-qrcode');
+    const securityErrorMain = document.getElementById('security-error-main');
+    const securityErrorSetup = document.getElementById('security-error-setup');
+
+    if (btnSecurity) {
+        btnSecurity.addEventListener('click', () => {
+            securityModal.classList.add('active');
+            securityIdle.classList.remove('hidden');
+            securitySetup.classList.add('hidden');
+            securityErrorMain.classList.add('hidden');
+            securityErrorSetup.classList.add('hidden');
+        });
+    }
+
+    if (btnCloseSecurity) {
+        btnCloseSecurity.addEventListener('click', () => {
+            securityModal.classList.remove('active');
+        });
+        
+        securityModal.addEventListener('click', (e) => {
+            if (e.target === securityModal) {
+                btnCloseSecurity.click();
+            }
+        });
+    }
+
+    if (btnSetup2fa) {
+        btnSetup2fa.addEventListener('click', async () => {
+            securityErrorMain.classList.add('hidden');
+            try {
+                const res = await fetch('/api/auth/setup-2fa');
+                const data = await res.json();
+                
+                if (res.ok) {
+                    securityIdle.classList.add('hidden');
+                    securitySetup.classList.remove('hidden');
+                    qrCodeDiv.innerHTML = '';
+                    new QRCode(qrCodeDiv, {
+                        text: data.setupUri,
+                        width: 150,
+                        height: 150,
+                        colorDark : "#000000",
+                        colorLight : "#ffffff",
+                        correctLevel : QRCode.CorrectLevel.M
+                    });
+                } else {
+                    securityErrorMain.textContent = data.error || 'Failed to setup 2FA';
+                    securityErrorMain.classList.remove('hidden');
+                }
+            } catch (err) {
+                securityErrorMain.textContent = 'Network error';
+                securityErrorMain.classList.remove('hidden');
+            }
+        });
+    }
+
+    if (confirm2faForm) {
+        confirm2faForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const code = document.getElementById('confirm-code').value;
+            securityErrorSetup.classList.add('hidden');
+            
+            try {
+                const res = await fetch('/api/auth/confirm-2fa', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code })
+                });
+                const data = await res.json();
+                
+                if (res.ok) {
+                    alert('2FA successfully enabled!');
+                    btnCloseSecurity.click();
+                } else {
+                    securityErrorSetup.textContent = data.error || 'Invalid code';
+                    securityErrorSetup.classList.remove('hidden');
+                }
+            } catch (err) {
+                securityErrorSetup.textContent = 'Network error';
+                securityErrorSetup.classList.remove('hidden');
+            }
+        });
+    }
 
     // Init
     loadWallets();

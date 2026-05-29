@@ -15,6 +15,10 @@ import struct
 import time
 import random
 
+def hash_password(password: str) -> str:
+    """Hash a password with SHA-256 for simplicity (in prod use bcrypt/argon2)."""
+    return hashlib.sha256(password.encode('utf-8')).hexdigest()
+
 def generate_totp_secret():
     """Generate a random 32-character Base32 secret."""
     return base64.b32encode(os.urandom(20)).decode('utf-8')
@@ -48,13 +52,16 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             phone TEXT UNIQUE,
             session_token TEXT,
-            totp_secret TEXT
+            totp_secret TEXT,
+            password_hash TEXT,
+            totp_enabled INTEGER DEFAULT 0
         )
     ''')
     try:
-        c.execute('ALTER TABLE users ADD COLUMN totp_secret TEXT')
+        c.execute('ALTER TABLE users ADD COLUMN password_hash TEXT')
+        c.execute('ALTER TABLE users ADD COLUMN totp_enabled INTEGER DEFAULT 0')
     except sqlite3.OperationalError:
-        pass # Column already exists
+        pass # Columns already exist
     c.execute('''
         CREATE TABLE IF NOT EXISTS wallets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,72 +114,109 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except json.JSONDecodeError:
             data = {}
 
-        if self.path == '/api/auth/send-code':
+        if self.path == '/api/auth/register':
             phone = data.get('phone')
-            if phone:
+            password = data.get('password')
+            
+            if phone and password:
                 conn = sqlite3.connect(DB_FILE)
                 c = conn.cursor()
-                c.execute('SELECT totp_secret FROM users WHERE phone = ?', (phone,))
-                user = c.fetchone()
+                c.execute('SELECT id FROM users WHERE phone = ?', (phone,))
+                if c.fetchone():
+                    conn.close()
+                    self.send_json({'error': 'Phone number already registered'}, 400)
+                    return
                 
-                is_new_user = False
-                totp_secret = None
-                
-                if not user:
-                    totp_secret = generate_totp_secret()
-                    c.execute('INSERT INTO users (phone, totp_secret) VALUES (?, ?)', (phone, totp_secret))
-                    is_new_user = True
-                elif not user[0]:
-                    totp_secret = generate_totp_secret()
-                    c.execute('UPDATE users SET totp_secret = ? WHERE phone = ?', (totp_secret, phone))
-                    is_new_user = True
-                else:
-                    totp_secret = user[0]
-                    
+                c.execute('INSERT INTO users (phone, password_hash) VALUES (?, ?)', (phone, hash_password(password)))
                 conn.commit()
                 conn.close()
-                
-                response_data = {'success': True}
-                if is_new_user:
-                    # Provide provisioning URI for QR code generation on the client
-                    app_name = urllib.parse.quote("Tradernet Dashboard")
-                    phone_encoded = urllib.parse.quote(phone)
-                    uri = f"otpauth://totp/{app_name}:{phone_encoded}?secret={totp_secret}&issuer={app_name}"
-                    response_data['setupRequired'] = True
-                    response_data['setupUri'] = uri
-                else:
-                    response_data['setupRequired'] = False
-                    
-                self.send_json(response_data)
+                self.send_json({'success': True, 'message': 'Account created'})
             else:
-                self.send_json({'error': 'Phone number required'}, 400)
+                self.send_json({'error': 'Phone and password required'}, 400)
                 
-        elif self.path == '/api/auth/verify-code':
+        elif self.path == '/api/auth/login':
+            phone = data.get('phone')
+            password = data.get('password')
+            
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute('SELECT id, password_hash, totp_enabled FROM users WHERE phone = ?', (phone,))
+            user = c.fetchone()
+            conn.close()
+            
+            if user and user[1] == hash_password(password):
+                if user[2] == 1:
+                    # 2FA is enabled
+                    self.send_json({'success': True, 'requires_2fa': True})
+                else:
+                    # No 2FA, log in immediately
+                    self._login_user(phone)
+            else:
+                self.send_json({'error': 'Invalid phone or password'}, 401)
+                
+        elif self.path == '/api/auth/verify-2fa':
             phone = data.get('phone')
             code = data.get('code')
             
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
-            c.execute('SELECT id, totp_secret FROM users WHERE phone = ?', (phone,))
+            c.execute('SELECT id, totp_secret, totp_enabled FROM users WHERE phone = ?', (phone,))
             user = c.fetchone()
+            conn.close()
             
-            if user and user[1] and verify_totp(user[1], code):
-                session_token = str(uuid.uuid4())
-                c.execute('UPDATE users SET session_token = ? WHERE phone = ?', (session_token, phone))
+            if user and user[2] == 1 and user[1] and verify_totp(user[1], code):
+                self._login_user(phone)
+            else:
+                self.send_json({'error': 'Invalid code'}, 401)
+                
+        elif self.path == '/api/auth/setup-2fa':
+            user = self.get_user_from_session()
+            if not user:
+                self.send_json({'error': 'Unauthorized'}, 401)
+                return
+                
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute('SELECT totp_secret, totp_enabled, phone FROM users WHERE id = ?', (user['id'],))
+            row = c.fetchone()
+            
+            if row[1] == 1:
+                conn.close()
+                self.send_json({'error': '2FA is already enabled'}, 400)
+                return
+                
+            totp_secret = row[0]
+            if not totp_secret:
+                totp_secret = generate_totp_secret()
+                c.execute('UPDATE users SET totp_secret = ? WHERE id = ?', (totp_secret, user['id']))
+                conn.commit()
+                
+            conn.close()
+            
+            app_name = urllib.parse.quote("Tradernet Dashboard")
+            phone_encoded = urllib.parse.quote(row[2])
+            uri = f"otpauth://totp/{app_name}:{phone_encoded}?secret={totp_secret}&issuer={app_name}"
+            
+            self.send_json({'setupUri': uri})
+            
+        elif self.path == '/api/auth/confirm-2fa':
+            user = self.get_user_from_session()
+            if not user:
+                self.send_json({'error': 'Unauthorized'}, 401)
+                return
+                
+            code = data.get('code')
+            
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute('SELECT totp_secret FROM users WHERE id = ?', (user['id'],))
+            row = c.fetchone()
+            
+            if row and row[0] and verify_totp(row[0], code):
+                c.execute('UPDATE users SET totp_enabled = 1 WHERE id = ?', (user['id'],))
                 conn.commit()
                 conn.close()
-                
-                # Set cookie
-                cookie = SimpleCookie()
-                cookie['session_token'] = session_token
-                cookie['session_token']['path'] = '/'
-                cookie['session_token']['httponly'] = True
-                
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.send_header('Set-Cookie', cookie.output(header='', sep=''))
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': True}).encode())
+                self.send_json({'success': True})
             else:
                 conn.close()
                 self.send_json({'error': 'Invalid code'}, 400)
@@ -309,6 +353,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Content-type', 'application/json')
         self.end_headers()
         self.wfile.write(json.dumps(data).encode())
+
+    def _login_user(self, phone):
+        """Helper to create session and return success."""
+        session_token = str(uuid.uuid4())
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('UPDATE users SET session_token = ? WHERE phone = ?', (session_token, phone))
+        conn.commit()
+        conn.close()
+        
+        cookie = SimpleCookie()
+        cookie['session_token'] = session_token
+        cookie['session_token']['path'] = '/'
+        cookie['session_token']['httponly'] = True
+        
+        self.send_response(200)
+        self.send_header('Content-type', 'application/json')
+        self.send_header('Set-Cookie', cookie.output(header='', sep=''))
+        self.end_headers()
+        self.wfile.write(json.dumps({'success': True}).encode())
 
     def get_user_from_session(self):
         if 'Cookie' in self.headers:

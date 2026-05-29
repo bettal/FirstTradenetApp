@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Tradernet Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -16,6 +17,7 @@
                 <h2>My Portfolios</h2>
             </div>
             <div style="display: flex; gap: 1rem;">
+                <button id="btn-security" class="btn-secondary" style="width: auto;">Security</button>
                 <button id="btn-open-modal" style="width: auto;">+ Connect Wallet</button>
                 <button id="btn-logout" class="btn-secondary" style="width: auto;">Logout</button>
             </div>
@@ -85,6 +87,36 @@
                         <pre id="api-response" style="margin: 0; padding: 1rem; color: #a5b4fc; font-family: monospace; font-size: 0.875rem; overflow-y: auto; height: 100%; position: absolute; top: 0; left: 0; right: 0; bottom: 0;">Awaiting request...</pre>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Security Settings Modal -->
+    <div id="security-modal" class="modal-overlay">
+        <div class="glass-panel modal-content" style="max-width: 400px; width: 90vw; text-align: center;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+                <h3>Security Settings</h3>
+                <button id="btn-close-security" class="btn-secondary" style="width: auto; padding: 0.25rem 0.5rem; border: none; font-size: 1.5rem;">&times;</button>
+            </div>
+            
+            <div id="security-idle">
+                <p style="margin-bottom: 1.5rem; font-size: 0.875rem;">Enhance your account security by enabling Two-Factor Authentication.</p>
+                <button id="btn-setup-2fa">Enable Google Authenticator</button>
+                <div id="security-error-main" class="error-message hidden"></div>
+            </div>
+
+            <div id="security-setup" class="hidden">
+                <h4 style="margin-bottom: 0.5rem;">Setup 2FA</h4>
+                <p style="margin-bottom: 1rem; font-size: 0.875rem;">Scan this QR code with Google Authenticator.</p>
+                <div id="dashboard-qrcode" style="display: inline-block; background: white; padding: 10px; border-radius: 8px; margin-bottom: 1.5rem;"></div>
+                <form id="confirm-2fa-form">
+                    <div class="form-group" style="text-align: left;">
+                        <label for="confirm-code">Verification Code</label>
+                        <input type="text" id="confirm-code" placeholder="Enter 6-digit code" required autocomplete="off" maxlength="6">
+                    </div>
+                    <button type="submit">Verify & Enable</button>
+                    <div id="security-error-setup" class="error-message hidden"></div>
+                </form>
             </div>
         </div>
     </div>
