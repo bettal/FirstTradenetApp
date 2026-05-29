@@ -100,7 +100,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c.execute('SELECT id, name, api_key FROM wallets WHERE user_id = ?', (user['id'],))
             wallets = [{'id': row[0], 'name': row[1], 'api_key': row[2]} for row in c.fetchall()]
             conn.close()
-            self.send_json({'wallets': wallets})
+            self.send_json({'wallets': wallets, 'totp_enabled': user['totp_enabled'] == 1})
             return
 
         return super().do_GET()
@@ -225,6 +225,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             user = self.get_user_from_session()
             if not user:
                 self.send_json({'error': 'Unauthorized'}, 401)
+                return
+                
+            if user['totp_enabled'] != 1:
+                self.send_json({'error': '2FA must be enabled to connect a wallet'}, 403)
                 return
                 
             name = data.get('name', 'My Wallet')
@@ -381,11 +385,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 token = cookie['session_token'].value
                 conn = sqlite3.connect(DB_FILE)
                 c = conn.cursor()
-                c.execute('SELECT id, phone FROM users WHERE session_token = ?', (token,))
+                c.execute('SELECT id, phone, totp_enabled FROM users WHERE session_token = ?', (token,))
                 user = c.fetchone()
                 conn.close()
                 if user:
-                    return {'id': user[0], 'phone': user[1]}
+                    return {'id': user[0], 'phone': user[1], 'totp_enabled': user[2]}
         return None
 
 if __name__ == "__main__":

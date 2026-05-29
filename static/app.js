@@ -121,6 +121,8 @@ function initDashboard() {
     if (!walletsContainer) return;
 
     // Fetch and display wallets
+    let totpEnabled = false;
+
     async function loadWallets() {
         try {
             const res = await fetch('/api/wallets');
@@ -129,13 +131,28 @@ function initDashboard() {
                 return;
             }
             const data = await res.json();
-            renderWallets(data.wallets || []);
+            totpEnabled = data.totp_enabled;
+            renderWallets(data.wallets || [], totpEnabled);
         } catch (err) {
             console.error('Failed to load wallets');
         }
     }
 
-    function renderWallets(wallets) {
+    function renderWallets(wallets, isTotpEnabled) {
+        if (!isTotpEnabled) {
+            walletsContainer.innerHTML = `
+                <div class="glass-panel" style="grid-column: 1 / -1; padding: 3rem; text-align: center; border-color: var(--error-color);">
+                    <p style="margin-bottom: 1rem; color: var(--error-color); font-weight: bold;">Security Alert</p>
+                    <p style="margin-bottom: 1.5rem;">You must enable Two-Factor Authentication (2FA) before connecting wallets.</p>
+                    <button onclick="document.getElementById('btn-security').click()" style="width: auto;">Enable Security</button>
+                </div>
+            `;
+            btnOpenModal.style.display = 'none';
+            return;
+        }
+
+        btnOpenModal.style.display = 'inline-block';
+
         if (wallets.length === 0) {
             walletsContainer.innerHTML = `
                 <div class="glass-panel" style="grid-column: 1 / -1; padding: 3rem; text-align: center;">
@@ -394,6 +411,7 @@ function initDashboard() {
                 if (res.ok) {
                     alert('2FA successfully enabled!');
                     btnCloseSecurity.click();
+                    loadWallets(); // Reload to show wallet options
                 } else {
                     securityErrorSetup.textContent = data.error || 'Invalid code';
                     securityErrorSetup.classList.remove('hidden');
