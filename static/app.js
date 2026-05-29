@@ -368,7 +368,7 @@ function initDashboard() {
         btnSetup2fa.addEventListener('click', async () => {
             securityErrorMain.classList.add('hidden');
             try {
-                const res = await fetch('/api/auth/setup-2fa');
+                const res = await fetch('/api/auth/setup-2fa', { method: 'POST' });
                 const data = await res.json();
                 
                 if (res.ok) {
