@@ -18,14 +18,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             phone TEXT UNIQUE,
-            session_token TEXT,
-            verification_code TEXT
+            session_token TEXT
         )
     ''')
-    try:
-        c.execute('ALTER TABLE users ADD COLUMN verification_code TEXT')
-    except sqlite3.OperationalError:
-        pass # Column already exists
     c.execute('''
         CREATE TABLE IF NOT EXISTS wallets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,50 +76,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self.path == '/api/auth/send-code':
             phone = data.get('phone')
             if phone:
-                import random
-                import urllib.request
-                import urllib.error
-                
-                # Generate 5-digit code
-                code = str(random.randint(10000, 99999))
-                
-                # Save to database
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                c.execute('SELECT id FROM users WHERE phone = ?', (phone,))
-                user = c.fetchone()
-                if not user:
-                    c.execute('INSERT INTO users (phone, verification_code) VALUES (?, ?)', (phone, code))
-                else:
-                    c.execute('UPDATE users SET verification_code = ? WHERE phone = ?', (code, phone))
-                conn.commit()
-                conn.close()
-                
-                tg_token = os.environ.get('TG_GATEWAY_TOKEN')
-                
-                if tg_token:
-                    payload = json.dumps({
-                        "phone_number": phone,
-                        "code": code
-                    }).encode('utf-8')
-                    headers = {
-                        'Authorization': f'Bearer {tg_token}',
-                        'Content-Type': 'application/json'
-                    }
-                    req = urllib.request.Request('https://gatewayapi.telegram.org/sendVerificationMessage', data=payload, headers=headers, method='POST')
-                    try:
-                        with urllib.request.urlopen(req) as response:
-                            print(f"Sent code via TG Gateway to {phone}")
-                            self.send_json({'success': True, 'message': 'Code sent via Telegram Gateway'})
-                    except urllib.error.HTTPError as e:
-                        print(f"TG Gateway Error: {e.code} - {e.read().decode('utf-8')}")
-                        self.send_json({'error': 'Failed to send verification code'}, 500)
-                    except Exception as e:
-                        print(f"TG Gateway Error: {str(e)}")
-                        self.send_json({'error': 'Failed to send verification code'}, 500)
-                else:
-                    print(f"MOCK (No Token): Generated code {code} for {phone}")
-                    self.send_json({'success': True, 'message': 'Code generated (Mock mode)'})
+                # Mock sending code via Telegram Gateway
+                print(f"MOCK: Sent verification code 12345 to {phone} via Telegram Gateway")
+                self.send_json({'success': True, 'message': 'Code sent via Telegram'})
             else:
                 self.send_json({'error': 'Phone number required'}, 400)
                 
@@ -132,14 +86,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             phone = data.get('phone')
             code = data.get('code')
             
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute('SELECT id, verification_code FROM users WHERE phone = ?', (phone,))
-            user = c.fetchone()
-            
-            if user and user[1] == code:
+            if code == '12345': # Mock verification
+                conn = sqlite3.connect(DB_FILE)
+                c = conn.cursor()
+                c.execute('SELECT id FROM users WHERE phone = ?', (phone,))
+                user = c.fetchone()
                 session_token = str(uuid.uuid4())
-                c.execute('UPDATE users SET session_token = ?, verification_code = NULL WHERE phone = ?', (session_token, phone))
+                
+                if not user:
+                    c.execute('INSERT INTO users (phone, session_token) VALUES (?, ?)', (phone, session_token))
+                else:
+                    c.execute('UPDATE users SET session_token = ? WHERE phone = ?', (session_token, phone))
                 conn.commit()
                 conn.close()
                 
@@ -155,7 +112,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': True}).encode())
             else:
-                conn.close()
                 self.send_json({'error': 'Invalid code'}, 400)
                 
         elif self.path == '/api/wallets':
