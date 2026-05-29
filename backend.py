@@ -14,6 +14,11 @@ import hashlib
 import struct
 import time
 import random
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+
+IN_MEMORY_SESSIONS = {}
 
 def hash_password(password: str) -> str:
     """Hash a password with SHA-256 for simplicity (in prod use bcrypt/argon2)."""
@@ -54,12 +59,14 @@ def init_db():
             session_token TEXT,
             totp_secret TEXT,
             password_hash TEXT,
-            totp_enabled INTEGER DEFAULT 0
+            totp_enabled INTEGER DEFAULT 0,
+            salt TEXT
         )
     ''')
     try:
         c.execute('ALTER TABLE users ADD COLUMN password_hash TEXT')
         c.execute('ALTER TABLE users ADD COLUMN totp_enabled INTEGER DEFAULT 0')
+        c.execute('ALTER TABLE users ADD COLUMN salt TEXT')
     except sqlite3.OperationalError:
         pass # Columns already exist
     c.execute('''
@@ -127,7 +134,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     self.send_json({'error': 'Phone number already registered'}, 400)
                     return
                 
-                c.execute('INSERT INTO users (phone, password_hash) VALUES (?, ?)', (phone, hash_password(password)))
+                salt = os.urandom(16).hex()
+                c.execute('INSERT INTO users (phone, password_hash, salt) VALUES (?, ?, ?)', (phone, hash_password(password), salt))
                 conn.commit()
                 conn.close()
                 self.send_json({'success': True, 'message': 'Account created'})
@@ -140,34 +148,40 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
-            c.execute('SELECT id, password_hash, totp_enabled FROM users WHERE phone = ?', (phone,))
+            c.execute('SELECT id, password_hash, totp_enabled, salt FROM users WHERE phone = ?', (phone,))
             user = c.fetchone()
             conn.close()
             
             if user and user[1] == hash_password(password):
+                salt = user[3]
                 if user[2] == 1:
                     # 2FA is enabled
                     self.send_json({'success': True, 'requires_2fa': True})
                 else:
                     # No 2FA, log in immediately
-                    self._login_user(phone)
+                    self._login_user(phone, password, salt)
             else:
                 self.send_json({'error': 'Invalid phone or password'}, 401)
                 
         elif self.path == '/api/auth/verify-2fa':
             phone = data.get('phone')
+            password = data.get('password')
             code = data.get('code')
+            
+            if not phone or not password or not code:
+                self.send_json({'error': 'Missing data'}, 400)
+                return
             
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
-            c.execute('SELECT id, totp_secret, totp_enabled FROM users WHERE phone = ?', (phone,))
+            c.execute('SELECT id, totp_secret, totp_enabled, password_hash, salt FROM users WHERE phone = ?', (phone,))
             user = c.fetchone()
             conn.close()
             
-            if user and user[2] == 1 and user[1] and verify_totp(user[1], code):
-                self._login_user(phone)
+            if user and user[2] == 1 and user[3] == hash_password(password) and user[1] and verify_totp(user[1], code):
+                self._login_user(phone, password, user[4])
             else:
-                self.send_json({'error': 'Invalid code'}, 401)
+                self.send_json({'error': 'Invalid code or password'}, 401)
                 
         elif self.path == '/api/auth/setup-2fa':
             user = self.get_user_from_session()
@@ -235,12 +249,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             api_key = data.get('apiKey')
             secret_key = data.get('secretKey')
             
+            if not user.get('encryption_key'):
+                self.send_json({'error': 'Encryption key missing, please re-login'}, 401)
+                return
+            
             if api_key and secret_key:
+                f = Fernet(user['encryption_key'])
+                encrypted_secret = f.encrypt(secret_key.encode('utf-8')).decode('utf-8')
+
                 conn = sqlite3.connect(DB_FILE)
                 c = conn.cursor()
-                # In a real app, encrypt the secret key!
                 c.execute('INSERT INTO wallets (user_id, name, api_key, secret_key) VALUES (?, ?, ?, ?)', 
-                          (user['id'], name, api_key, secret_key))
+                          (user['id'], name, api_key, encrypted_secret))
                 conn.commit()
                 conn.close()
                 self.send_json({'success': True})
@@ -271,8 +291,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({'error': 'Wallet not found'}, 404)
                 return
 
+            if not user.get('encryption_key'):
+                self.send_json({'error': 'Encryption key missing, please re-login'}, 401)
+                return
+
             public_key = wallet[0]
-            private_key = wallet[1]
+            try:
+                f = Fernet(user['encryption_key'])
+                private_key = f.decrypt(wallet[1].encode('utf-8')).decode('utf-8')
+            except Exception:
+                self.send_json({'error': 'Decryption failed'}, 500)
+                return
 
             # Prepare Tradernet payload
 
@@ -358,9 +387,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data).encode())
 
-    def _login_user(self, phone):
-        """Helper to create session and return success."""
+    def _login_user(self, phone, password, salt):
+        """Helper to create session, derive key and return success."""
+        # Derive key
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=bytes.fromhex(salt),
+            iterations=390000,
+        )
+        encryption_key = base64.urlsafe_b64encode(kdf.derive(password.encode('utf-8')))
+        
         session_token = str(uuid.uuid4())
+        IN_MEMORY_SESSIONS[session_token] = encryption_key
+
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('UPDATE users SET session_token = ? WHERE phone = ?', (session_token, phone))
@@ -389,7 +429,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 user = c.fetchone()
                 conn.close()
                 if user:
-                    return {'id': user[0], 'phone': user[1], 'totp_enabled': user[2]}
+                    encryption_key = IN_MEMORY_SESSIONS.get(token)
+                    return {'id': user[0], 'phone': user[1], 'totp_enabled': user[2], 'encryption_key': encryption_key}
         return None
 
 if __name__ == "__main__":

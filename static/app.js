@@ -79,6 +79,7 @@ function initLogin() {
     codeForm.addEventListener('submit', async (e) => {
         e.preventDefault();
         const phone = document.getElementById('phone').value;
+        const password = document.getElementById('password').value;
         const code = document.getElementById('code').value;
         const errorDiv = document.getElementById('code-error');
         errorDiv.classList.add('hidden');
@@ -87,7 +88,7 @@ function initLogin() {
             const res = await fetch('/api/auth/verify-2fa', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ phone, code })
+                body: JSON.stringify({ phone, password, code })
             });
             const data = await res.json();
             
