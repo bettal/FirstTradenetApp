@@ -12,13 +12,19 @@ import hmac
 import hashlib
 import struct
 import time
-
 import bcrypt
 import psycopg2
-
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
+
+# Import Tradernet modules for hybrid system
+try:
+    from tradernet import Tradernet as OfficialSDK
+    from tradernet_api.api import API as ThirdPartyAPI
+except ImportError:
+    OfficialSDK = None
+    ThirdPartyAPI = None
 
 IN_MEMORY_SESSIONS = {}
 
@@ -114,6 +120,59 @@ def init_db():
     conn.close()
 
 init_db()
+
+class TradeManager:
+    """
+    Hybrid Tradernet API manager that combines official SDK and third-party API
+    """
+    def __init__(self, public_key: str, private_key: str):
+        self.public_key = public_key
+        self.private_key = private_key
+        
+        # Initialize official SDK if available
+        if OfficialSDK:
+            self.official_api = OfficialSDK(
+                self.public_key,
+                self.private_key
+            )
+        else:
+            self.official_api = None
+            
+        # Initialize third-party API if available
+        if ThirdPartyAPI:
+            self.third_party_api = ThirdPartyAPI(
+                api_key=self.public_key,
+                secret_key=self.private_key
+            )
+        else:
+            self.third_party_api = None
+
+    # --- Market data methods (using official SDK) ---
+    def get_quotes(self, ticker: str):
+        """Get quotes using official SDK"""
+        if self.official_api:
+            return self.official_api.quotes_get(ticker)
+        else:
+            raise Exception("Official SDK not available")
+
+    # --- Order execution methods (using third-party API) ---
+    def send_order(self, ticker: str, side: str, count: int, **kwargs):
+        """Send order using third-party API"""
+        if self.third_party_api:
+            return self.third_party_api.send_order(ticker=ticker, side=side, count=count, **kwargs)
+        else:
+            raise Exception("Third-party API not available")
+
+    def set_stop_loss_take_profit(self, ticker: str, stop_loss=None, take_profit=None):
+        """Set stop-loss and/or take-profit orders"""
+        if self.third_party_api:
+            return self.third_party_api.set_stop_order(
+                ticker=ticker,
+                stop_loss=stop_loss,
+                take_profit=take_profit
+            )
+        else:
+            raise Exception("Third-party API not available")
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -369,6 +428,69 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     self.send_json(error_res, e.code)
                 except:
                     self.send_json({'error': f'Tradernet API Error: {e.code}'}, e.code)
+            except Exception as e:
+                self.send_json({'error': str(e)}, 500)
+        elif self.path == '/api/tradernet-hybrid':
+            # New endpoint for hybrid Tradernet functionality
+            user = self.get_user_from_session()
+            if not user:
+                self.send_json({'error': 'Unauthorized'}, 401)
+                return
+
+            wallet_id = data.get('walletId')
+            operation = data.get('operation')
+            
+            if not wallet_id or not operation:
+                self.send_json({'error': 'Missing walletId or operation'}, 400)
+                return
+
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('SELECT api_key, secret_key FROM wallets WHERE id = %s AND user_id = %s', (wallet_id, user['id']))
+            wallet = c.fetchone()
+            conn.close()
+
+            if not wallet:
+                self.send_json({'error': 'Wallet not found'}, 404)
+                return
+
+            if not user.get('encryption_key'):
+                self.send_json({'error': 'Encryption key missing, please re-login'}, 401)
+                return
+
+            try:
+                f = Fernet(user['encryption_key'])
+                private_key = f.decrypt(wallet[1].encode('utf-8')).decode('utf-8')
+                
+                # Create TradeManager instance for hybrid operations
+                trade_manager = TradeManager(
+                    public_key=wallet[0],
+                    private_key=private_key
+                )
+                
+                if operation == 'get_quotes':
+                    ticker = data.get('ticker', 'AAPL.US')
+                    result = trade_manager.get_quotes(ticker)
+                    self.send_json(result)
+                elif operation == 'send_order':
+                    ticker = data.get('ticker', 'AAPL.US')
+                    side = data.get('side', 'buy')
+                    count = data.get('count', 1)
+                    result = trade_manager.send_order(ticker=ticker, side=side, count=count)
+                    self.send_json(result)
+                elif operation == 'set_stop_loss_take_profit':
+                    ticker = data.get('ticker', 'AAPL.US')
+                    stop_loss = data.get('stop_loss')
+                    take_profit = data.get('take_profit')
+                    result = trade_manager.set_stop_loss_take_profit(
+                        ticker=ticker,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit
+                    )
+                    self.send_json(result)
+                else:
+                    self.send_json({'error': 'Invalid operation'}, 400)
+                    
             except Exception as e:
                 self.send_json({'error': str(e)}, 500)
         else:
