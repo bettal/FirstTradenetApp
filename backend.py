@@ -1,6 +1,5 @@
 import http.server
 import socketserver
-import sqlite3
 import json
 import os
 import uuid
@@ -13,8 +12,10 @@ import hmac
 import hashlib
 import struct
 import time
-import random
+
 import bcrypt
+import psycopg2
+
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
@@ -54,15 +55,31 @@ def verify_totp(secret: str, code: str, window: int = 1) -> bool:
     return False
 
 PORT = 8000
-DB_FILE = 'db.sqlite'
+
+# PostgreSQL configuration (use environment variables with defaults)
+DB_HOST = os.environ.get('DB_HOST', 'localhost')
+DB_PORT = int(os.environ.get('DB_PORT', 5432))
+DB_NAME = os.environ.get('DB_NAME', 'tradernet')
+DB_USER = os.environ.get('DB_USER', 'postgres')
+DB_PASSWORD = os.environ.get('DB_PASSWORD', 'postgres')
+
+def get_db():
+    """Get a new PostgreSQL database connection."""
+    return psycopg2.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD
+    )
 
 # Initialize DB
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db()
     c = conn.cursor()
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             phone TEXT UNIQUE,
             session_token TEXT,
             totp_secret TEXT,
@@ -71,15 +88,21 @@ def init_db():
             salt TEXT
         )
     ''')
-    try:
-        c.execute('ALTER TABLE users ADD COLUMN password_hash TEXT')
-        c.execute('ALTER TABLE users ADD COLUMN totp_enabled INTEGER DEFAULT 0')
-        c.execute('ALTER TABLE users ADD COLUMN salt TEXT')
-    except sqlite3.OperationalError:
-        pass # Columns already exist
+    # Add columns if they don't exist (safe migration using DO block)
+    for col_name, col_def in [
+        ('password_hash', 'TEXT'),
+        ('totp_enabled', 'INTEGER DEFAULT 0'),
+        ('salt', 'TEXT'),
+    ]:
+        c.execute(f"""
+            DO $$ BEGIN
+                ALTER TABLE users ADD COLUMN {col_name} {col_def};
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$;
+        """)
     c.execute('''
         CREATE TABLE IF NOT EXISTS wallets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             user_id INTEGER,
             name TEXT,
             api_key TEXT,
@@ -110,9 +133,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({'error': 'Unauthorized'}, 401)
                 return
             
-            conn = sqlite3.connect(DB_FILE)
+            conn = get_db()
             c = conn.cursor()
-            c.execute('SELECT id, name, api_key FROM wallets WHERE user_id = ?', (user['id'],))
+            c.execute('SELECT id, name, api_key FROM wallets WHERE user_id = %s', (user['id'],))
             wallets = [{'id': row[0], 'name': row[1], 'api_key': row[2]} for row in c.fetchall()]
             conn.close()
             self.send_json({'wallets': wallets, 'totp_enabled': user['totp_enabled'] == 1})
@@ -134,16 +157,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             password = data.get('password')
             
             if phone and password:
-                conn = sqlite3.connect(DB_FILE)
+                conn = get_db()
                 c = conn.cursor()
-                c.execute('SELECT id FROM users WHERE phone = ?', (phone,))
+                c.execute('SELECT id FROM users WHERE phone = %s', (phone,))
                 if c.fetchone():
                     conn.close()
                     self.send_json({'error': 'Phone number already registered'}, 400)
                     return
                 
                 salt = os.urandom(16).hex()
-                c.execute('INSERT INTO users (phone, password_hash, salt) VALUES (?, ?, ?)', (phone, hash_password(password), salt))
+                c.execute('INSERT INTO users (phone, password_hash, salt) VALUES (%s, %s, %s)', (phone, hash_password(password), salt))
                 conn.commit()
                 conn.close()
                 self.send_json({'success': True, 'message': 'Account created'})
@@ -154,9 +177,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             phone = data.get('phone')
             password = data.get('password')
             
-            conn = sqlite3.connect(DB_FILE)
+            conn = get_db()
             c = conn.cursor()
-            c.execute('SELECT id, password_hash, totp_enabled, salt FROM users WHERE phone = ?', (phone,))
+            c.execute('SELECT id, password_hash, totp_enabled, salt FROM users WHERE phone = %s', (phone,))
             user = c.fetchone()
             conn.close()
             
@@ -180,9 +203,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({'error': 'Missing data'}, 400)
                 return
             
-            conn = sqlite3.connect(DB_FILE)
+            conn = get_db()
             c = conn.cursor()
-            c.execute('SELECT id, totp_secret, totp_enabled, password_hash, salt FROM users WHERE phone = ?', (phone,))
+            c.execute('SELECT id, totp_secret, totp_enabled, password_hash, salt FROM users WHERE phone = %s', (phone,))
             user = c.fetchone()
             conn.close()
             
@@ -197,9 +220,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({'error': 'Unauthorized'}, 401)
                 return
                 
-            conn = sqlite3.connect(DB_FILE)
+            conn = get_db()
             c = conn.cursor()
-            c.execute('SELECT totp_secret, totp_enabled, phone FROM users WHERE id = ?', (user['id'],))
+            c.execute('SELECT totp_secret, totp_enabled, phone FROM users WHERE id = %s', (user['id'],))
             row = c.fetchone()
             
             if row[1] == 1:
@@ -210,7 +233,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             totp_secret = row[0]
             if not totp_secret:
                 totp_secret = generate_totp_secret()
-                c.execute('UPDATE users SET totp_secret = ? WHERE id = ?', (totp_secret, user['id']))
+                c.execute('UPDATE users SET totp_secret = %s WHERE id = %s', (totp_secret, user['id']))
                 conn.commit()
                 
             conn.close()
@@ -229,13 +252,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 
             code = data.get('code')
             
-            conn = sqlite3.connect(DB_FILE)
+            conn = get_db()
             c = conn.cursor()
-            c.execute('SELECT totp_secret FROM users WHERE id = ?', (user['id'],))
+            c.execute('SELECT totp_secret FROM users WHERE id = %s', (user['id'],))
             row = c.fetchone()
             
             if row and row[0] and verify_totp(row[0], code):
-                c.execute('UPDATE users SET totp_enabled = 1 WHERE id = ?', (user['id'],))
+                c.execute('UPDATE users SET totp_enabled = 1 WHERE id = %s', (user['id'],))
                 conn.commit()
                 conn.close()
                 self.send_json({'success': True})
@@ -265,9 +288,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 f = Fernet(user['encryption_key'])
                 encrypted_secret = f.encrypt(secret_key.encode('utf-8')).decode('utf-8')
 
-                conn = sqlite3.connect(DB_FILE)
+                conn = get_db()
                 c = conn.cursor()
-                c.execute('INSERT INTO wallets (user_id, name, api_key, secret_key) VALUES (?, ?, ?, ?)', 
+                c.execute('INSERT INTO wallets (user_id, name, api_key, secret_key) VALUES (%s, %s, %s, %s)', 
                           (user['id'], name, api_key, encrypted_secret))
                 conn.commit()
                 conn.close()
@@ -289,9 +312,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({'error': 'Missing walletId or cmd'}, 400)
                 return
 
-            conn = sqlite3.connect(DB_FILE)
+            conn = get_db()
             c = conn.cursor()
-            c.execute('SELECT api_key, secret_key FROM wallets WHERE id = ? AND user_id = ?', (wallet_id, user['id']))
+            c.execute('SELECT api_key, secret_key FROM wallets WHERE id = %s AND user_id = %s', (wallet_id, user['id']))
             wallet = c.fetchone()
             conn.close()
 
@@ -374,9 +397,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({'error': 'Missing wallet ID'}, 400)
                 return
             
-            conn = sqlite3.connect(DB_FILE)
+            conn = get_db()
             c = conn.cursor()
-            c.execute('DELETE FROM wallets WHERE id = ? AND user_id = ?', (wallet_id, user['id']))
+            c.execute('DELETE FROM wallets WHERE id = %s AND user_id = %s', (wallet_id, user['id']))
             conn.commit()
             deleted = c.rowcount
             conn.close()
@@ -409,9 +432,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         session_token = str(uuid.uuid4())
         IN_MEMORY_SESSIONS[session_token] = encryption_key
 
-        conn = sqlite3.connect(DB_FILE)
+        conn = get_db()
         c = conn.cursor()
-        c.execute('UPDATE users SET session_token = ? WHERE phone = ?', (session_token, phone))
+        c.execute('UPDATE users SET session_token = %s WHERE phone = %s', (session_token, phone))
         conn.commit()
         conn.close()
         
@@ -431,9 +454,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             cookie = SimpleCookie(self.headers.get('Cookie'))
             if 'session_token' in cookie:
                 token = cookie['session_token'].value
-                conn = sqlite3.connect(DB_FILE)
+                conn = get_db()
                 c = conn.cursor()
-                c.execute('SELECT id, phone, totp_enabled FROM users WHERE session_token = ?', (token,))
+                c.execute('SELECT id, phone, totp_enabled FROM users WHERE session_token = %s', (token,))
                 user = c.fetchone()
                 conn.close()
                 if user:
