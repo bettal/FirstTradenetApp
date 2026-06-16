@@ -70,12 +70,19 @@
                     <form id="explorer-form">
                         <input type="hidden" id="explorer-wallet-id">
                         <div class="form-group">
-                            <label for="api-cmd">Command Name (cmd)</label>
-                            <input type="text" id="api-cmd" placeholder="e.g. getSecurityInfo" required>
+                            <label for="explorer-category">Category</label>
+                            <select id="explorer-category" style="width: 100%; padding: 0.75rem 1rem; background: rgba(15, 23, 42, 0.6); border: 1px solid var(--glass-border); border-radius: 8px; color: var(--text-main); font-size: 0.875rem;">
+                                <option value="">-- Select Category --</option>
+                            </select>
                         </div>
                         <div class="form-group">
-                            <label for="api-params">Parameters (JSON)</label>
-                            <textarea id="api-params" rows="8" placeholder='{"ticker": "AAPL.US"}' style="width: 100%; padding: 0.75rem 1rem; background: rgba(15, 23, 42, 0.6); border: 1px solid var(--glass-border); border-radius: 8px; color: var(--text-main); font-family: monospace; font-size: 0.875rem; resize: vertical;"></textarea>
+                            <label for="explorer-command">Command</label>
+                            <select id="explorer-command" style="width: 100%; padding: 0.75rem 1rem; background: rgba(15, 23, 42, 0.6); border: 1px solid var(--glass-border); border-radius: 8px; color: var(--text-main); font-size: 0.875rem;">
+                                <option value="">-- Select Command --</option>
+                            </select>
+                        </div>
+                        <div id="explorer-params-container">
+                            <!-- Dynamic parameter fields will be injected here -->
                         </div>
                         <button type="submit">Send Request</button>
                         <div id="explorer-error" class="error-message hidden"></div>

@@ -212,6 +212,127 @@ function initDashboard() {
     const explorerWalletId = document.getElementById('explorer-wallet-id');
     const explorerTitle = document.getElementById('explorer-title');
     const apiResponse = document.getElementById('api-response');
+    const expCategory = document.getElementById('explorer-category');
+    const expCommand = document.getElementById('explorer-command');
+    const expParamsContainer = document.getElementById('explorer-params-container');
+
+    let explorerCommands = [];
+    let selectedCommandDef = null;
+
+    async function loadExplorerCommands() {
+        try {
+            const res = await fetch('/api/commands');
+            if (res.ok) {
+                explorerCommands = await res.json();
+                populateCategories();
+            }
+        } catch (err) {
+            console.error('Failed to load commands');
+        }
+    }
+
+    function populateCategories() {
+        const cats = new Map();
+        explorerCommands.forEach(cmd => {
+            if (!cats.has(cmd.category)) {
+                cats.set(cmd.category, cmd.category_display);
+            }
+        });
+        expCategory.innerHTML = '<option value="">-- Select Category --</option>';
+        cats.forEach((display, key) => {
+            const opt = document.createElement('option');
+            opt.value = key;
+            opt.textContent = display;
+            expCategory.appendChild(opt);
+        });
+    }
+
+    function populateCommands(category) {
+        expCommand.innerHTML = '<option value="">-- Select Command --</option>';
+        expParamsContainer.innerHTML = '';
+        selectedCommandDef = null;
+
+        if (!category) return;
+
+        const filtered = explorerCommands.filter(cmd => cmd.category === category);
+        filtered.forEach(cmd => {
+            const opt = document.createElement('option');
+            opt.value = cmd.name;
+            opt.textContent = cmd.display_name;
+            expCommand.appendChild(opt);
+        });
+    }
+
+    function renderParams(commandDef) {
+        expParamsContainer.innerHTML = '';
+        selectedCommandDef = commandDef;
+        if (!commandDef || !commandDef.params) return;
+
+        commandDef.params.forEach(param => {
+            const group = document.createElement('div');
+            group.className = 'form-group';
+
+            const label = document.createElement('label');
+            label.setAttribute('for', `param-${param.name}`);
+            label.textContent = `${param.name}${param.required ? ' *' : ''}`;
+
+            const input = document.createElement(param.type === 'bool' ? 'select' : param.type === 'json' ? 'textarea' : 'input');
+            input.id = `param-${param.name}`;
+            input.name = param.name;
+            input.dataset.paramType = param.type;
+
+            if (param.type === 'bool') {
+                const trueOpt = document.createElement('option');
+                trueOpt.value = 'true';
+                trueOpt.textContent = 'true';
+                const falseOpt = document.createElement('option');
+                falseOpt.value = 'false';
+                falseOpt.textContent = 'false';
+                input.appendChild(trueOpt);
+                input.appendChild(falseOpt);
+                input.value = param.default !== undefined ? String(param.default) : 'true';
+            } else if (param.type === 'json') {
+                input.rows = 4;
+                input.placeholder = param.default || '{}';
+                input.style.cssText = 'width: 100%; padding: 0.75rem 1rem; background: rgba(15, 23, 42, 0.6); border: 1px solid var(--glass-border); border-radius: 8px; color: var(--text-main); font-family: monospace; font-size: 0.875rem; resize: vertical;';
+            } else if (param.type === 'int' || param.type === 'float') {
+                input.type = 'number';
+                input.step = param.type === 'float' ? '0.01' : '1';
+                if (param.default !== undefined && param.default !== '') input.value = param.default;
+                input.placeholder = String(param.default ?? '');
+            } else {
+                input.type = 'text';
+                if (param.default !== undefined && param.default !== '') input.value = param.default;
+                input.placeholder = param.default || param.description || '';
+            }
+
+            input.style.cssText = (input.style.cssText || '') + 'width: 100%; padding: 0.75rem 1rem; background: rgba(15, 23, 42, 0.6); border: 1px solid var(--glass-border); border-radius: 8px; color: var(--text-main); font-size: 0.875rem;';
+
+            if (param.description) {
+                const desc = document.createElement('small');
+                desc.style.cssText = 'display: block; color: var(--text-muted); font-size: 0.75rem; margin-top: 0.25rem;';
+                desc.textContent = param.description;
+                group.appendChild(label);
+                group.appendChild(input);
+                group.appendChild(desc);
+            } else {
+                group.appendChild(label);
+                group.appendChild(input);
+            }
+
+            expParamsContainer.appendChild(group);
+        });
+    }
+
+    expCategory.addEventListener('change', () => {
+        populateCommands(expCategory.value);
+    });
+
+    expCommand.addEventListener('change', () => {
+        const cmdName = expCommand.value;
+        const cmdDef = explorerCommands.find(c => c.name === cmdName);
+        renderParams(cmdDef);
+    });
 
     // Make wallet cards clickable to open explorer
     walletsContainer.addEventListener('click', async (e) => {
@@ -245,6 +366,7 @@ function initDashboard() {
             explorerTitle.textContent = `API Explorer: ${walletName}`;
             explorerWalletId.value = walletId;
             apiResponse.textContent = "Awaiting request...";
+            loadExplorerCommands();
             explorerModal.classList.add('active');
         }
     });
@@ -252,6 +374,7 @@ function initDashboard() {
     btnCloseExplorer.addEventListener('click', () => {
         explorerModal.classList.remove('active');
         explorerForm.reset();
+        expParamsContainer.innerHTML = '';
         document.getElementById('explorer-error').classList.add('hidden');
     });
 
@@ -264,29 +387,37 @@ function initDashboard() {
     explorerForm.addEventListener('submit', async (e) => {
         e.preventDefault();
         const walletId = explorerWalletId.value;
-        const cmd = document.getElementById('api-cmd').value;
-        const paramsStr = document.getElementById('api-params').value;
+        const commandName = expCommand.value;
         const errorDiv = document.getElementById('explorer-error');
         errorDiv.classList.add('hidden');
 
-        let params = {};
-        if (paramsStr.trim() !== '') {
-            try {
-                params = JSON.parse(paramsStr);
-            } catch (err) {
-                errorDiv.textContent = 'Invalid JSON in parameters';
-                errorDiv.classList.remove('hidden');
-                return;
-            }
+        if (!commandName) {
+            errorDiv.textContent = 'Please select a command';
+            errorDiv.classList.remove('hidden');
+            return;
         }
+
+        const params = {};
+        const paramInputs = expParamsContainer.querySelectorAll('input, select, textarea');
+        paramInputs.forEach(input => {
+            const type = input.dataset.paramType;
+            let val = input.value;
+            if (type === 'int') val = parseInt(val, 10);
+            else if (type === 'float') val = parseFloat(val);
+            else if (type === 'bool') val = val === 'true';
+            else if (type === 'json') {
+                try { val = JSON.parse(val || '{}'); } catch { val = {}; }
+            }
+            params[input.name] = val;
+        });
 
         apiResponse.textContent = "Loading...";
 
         try {
-            const res = await fetch('/api/tradernet', {
+            const res = await fetch('/api/wallet-command', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ walletId, cmd, params })
+                body: JSON.stringify({ walletId, command: commandName, params })
             });
             const data = await res.json();
             apiResponse.textContent = JSON.stringify(data, null, 2);
