@@ -393,32 +393,62 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({'error': 'Decryption failed'}, 500)
                 return
 
-            # Prepare Tradernet payload
+            # --- Tradernet API V2 call ---
+            # Build request data matching tradernet_api V2 protocol
+            nonce = int(time.time() * 10000)
+            
+            def flatten_params(data, root_name=''):
+                """Flatten nested dict to key[subkey]=value format, sorted by key."""
+                result = []
+                for key, value in sorted(data.items()):
+                    if isinstance(value, dict):
+                        result.extend(flatten_params(value, key))
+                    else:
+                        full_key = f"{root_name}[{key}]" if root_name else key
+                        result.append(f"{full_key}={value}")
+                return result
 
-            payload = {
+            def to_query_string(data):
+                """Convert dict to sorted '&' separated string, flattening nested dicts."""
+                parts = []
+                for key, value in sorted(data.items()):
+                    if isinstance(value, dict):
+                        parts.append(f"{key}={to_query_string(value)}")
+                    else:
+                        parts.append(f"{key}={value}")
+                return "&".join(parts)
+
+            # Build the data dict that will be URL-encoded
+            api_data = {
                 "cmd": cmd,
-                "params": params
+                "params": params,
+                "nonce": nonce,
+                "apiKey": public_key,
             }
-            payload_str = json.dumps(payload)
-            timestamp = int(time.time())
 
-            # HMAC-SHA256 Signature
-            message = (payload_str + str(timestamp)).encode('utf-8')
+            # Build sorted query string for signing
+            query_string = to_query_string(api_data)
+
+            # HMAC-SHA256 signature over the sorted query string
             signature = hmac.new(
                 private_key.encode('utf-8'),
-                message,
+                query_string.encode('utf-8'),
                 hashlib.sha256
             ).hexdigest()
 
+            # Build URL-encoded body
+            body_parts = flatten_params(api_data)
+            body_str = "&".join(body_parts)
+
             headers = {
-                'X-NtApi-PublicKey': public_key,
                 'X-NtApi-Sig': signature,
-                'X-NtApi-Timestamp': str(timestamp),
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/x-www-form-urlencoded',
             }
 
+            api_url = f"https://tradernet.ru/api/v2/cmd/{urllib.parse.quote(cmd, safe='')}"
+
             try:
-                req = urllib.request.Request('https://tradernet.com/api/', data=payload_str.encode('utf-8'), headers=headers, method='POST')
+                req = urllib.request.Request(api_url, data=body_str.encode('utf-8'), headers=headers, method='POST')
                 with urllib.request.urlopen(req) as response:
                     res_body = response.read()
                     self.send_json(json.loads(res_body.decode('utf-8')))
