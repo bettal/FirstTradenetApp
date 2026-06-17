@@ -215,32 +215,44 @@ COMMANDS_REGISTRY = [
     ]},
 ]
 
-def _api_auth_request(command, params, public_key, private_key, api_base="https://tradernet.am"):
-    """Make API request using auth method from /auth-api page.
-    
-    POST body: JSON params
-    Headers: X-NtApi-PublicKey, X-NtApi-Timestamp, X-NtApi-Sig
-    Signature: HMAC-SHA256(privateKey, json_body + timestamp)
-    """
-    timestamp = int(time.time())
-    json_body = json.dumps(params) if params else ''
+def _api_auth_request(command, params, public_key, private_key, api_base="https://tradernet.ru"):
+    nonce = int(time.time() * 10000)
+
+    def _flatten_params(data, root_name=''):
+        result = []
+        for key, value in sorted(data.items()):
+            if isinstance(value, dict):
+                result.extend(_flatten_params(value, key))
+            else:
+                full_key = f"{root_name}[{key}]" if root_name else key
+                result.append(f"{full_key}={value}")
+        return result
+
+    def _to_query_string(data):
+        parts = []
+        for key, value in sorted(data.items()):
+            if isinstance(value, dict):
+                parts.append(f"{key}={_to_query_string(value)}")
+            else:
+                parts.append(f"{key}={value}")
+        return "&".join(parts)
+
+    api_data = {"cmd": command, "nonce": nonce, "apiKey": public_key}
+    if params:
+        api_data["params"] = params
+    query_string = _to_query_string(api_data)
     signature = hmac.new(
         private_key.encode('utf-8'),
-        (json_body + str(timestamp)).encode('utf-8'),
+        query_string.encode('utf-8'),
         hashlib.sha256
     ).hexdigest()
-
+    body_str = "&".join(_flatten_params(api_data))
     headers = {
-        'X-NtApi-PublicKey': public_key,
         'X-NtApi-Sig': signature,
-        'X-NtApi-Timestamp': str(timestamp),
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
     }
-
-    url = f"{api_base}/api/{command}"
-    data = json_body.encode('utf-8') if json_body else None
-
-    req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+    url = f"{api_base}/api/v2/cmd/{command}"
+    req = urllib.request.Request(url, data=body_str.encode('utf-8'), headers=headers, method='POST')
     with urllib.request.urlopen(req) as resp:
         return json.loads(resp.read().decode('utf-8'))
 
