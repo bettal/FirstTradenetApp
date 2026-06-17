@@ -429,8 +429,12 @@ function initDashboard() {
         const errorDiv = document.getElementById('edit-wallet-error');
         errorDiv.classList.add('hidden');
 
+        const login = document.getElementById('edit-login').value;
+        const password = document.getElementById('edit-password').value;
         const body = { id, name, apiKey };
         if (secretKey) body.secretKey = secretKey;
+        if (login) body.login = login;
+        if (password) body.password = password;
 
         try {
             const res = await fetch('/api/wallets', {
@@ -508,6 +512,8 @@ function initDashboard() {
                 document.getElementById('edit-wallet-id').value = card.dataset.id;
                 document.getElementById('edit-wallet-name').value = card.dataset.name;
                 document.getElementById('edit-api-key').value = card.dataset.apiKey;
+                document.getElementById('edit-login').value = card.dataset.login || '';
+                document.getElementById('edit-password').value = '';
                 document.getElementById('edit-secret-key').value = '';
                 editSecretKeyInput.type = 'password';
                 toggleSecretIcon.innerHTML = '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>';

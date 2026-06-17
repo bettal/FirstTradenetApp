@@ -899,6 +899,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             name = data.get('name')
             api_key = data.get('apiKey')
             secret_key = data.get('secretKey')
+            login = data.get('login')
+            password = data.get('password')
 
             if not wallet_id:
                 self.send_json({'error': 'Missing wallet ID'}, 400)
@@ -921,6 +923,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 encrypted = f.encrypt(secret_key.encode('utf-8')).decode('utf-8')
                 updates.append('secret_key = %s')
                 values.append(encrypted)
+            if login is not None:
+                updates.append('login = %s')
+                values.append(login)
+            if password is not None:
+                updates.append('password = %s')
+                values.append(password)
 
             if not updates:
                 self.send_json({'error': 'Nothing to update'}, 400)
