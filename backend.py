@@ -178,34 +178,39 @@ class TradeManager:
 
 COMMANDS_REGISTRY = [
     # --- Market Data ---
-    {"name": "tradernet_api.get_ticker_info", "display_name": "Ticker Info", "category": "market_data", "category_display": "Market Data", "library": "tradernet_api", "method": "get_ticker_info", "params": [
-        {"name": "ticker", "type": "string", "required": True, "description": "Ticker symbol"},
-        {"name": "sup", "type": "bool", "required": False, "default": False, "description": "Extended info"}
+    {"name": "getSecurityInfo", "display_name": "Ticker Info", "category": "market_data", "category_display": "Market Data", "library": "raw_v2", "cmd": "getSecurityInfo", "params": [
+        {"name": "symbol", "type": "string", "required": True, "description": "Ticker symbol (e.g. AAPL.US)"},
+        {"name": "sup", "type": "bool", "required": False, "default": True, "description": "Extended info format"}
     ]},
-    {"name": "raw.getMarketStatus", "display_name": "Market Status", "category": "market_data", "category_display": "Market Data", "library": "raw_v2", "method": "", "cmd": "getMarketStatus", "params": [
+    {"name": "getMarketStatus", "display_name": "Market Status", "category": "market_data", "category_display": "Market Data", "library": "raw_v2", "cmd": "getMarketStatus", "params": [
         {"name": "market", "type": "string", "required": False, "default": "*", "description": "Market code"}
     ]},
+    # --- User Data ---
+    {"name": "getOPQ", "display_name": "User Info (OPQ)", "category": "portfolio", "category_display": "Portfolio", "library": "raw_v2", "cmd": "getOPQ", "params": []},
     # --- Orders ---
-    {"name": "tradernet_api.send_order", "display_name": "Send Order", "category": "orders", "category_display": "Orders", "library": "tradernet_api", "method": "send_order", "params": [
-        {"name": "ticker", "type": "string", "required": True, "description": "Ticker symbol (e.g. AAPL)"},
+    {"name": "putTradeOrder", "display_name": "Send Order", "category": "orders", "category_display": "Orders", "library": "raw_v2", "cmd": "putTradeOrder", "params": [
+        {"name": "instr_name", "type": "string", "required": True, "description": "Ticker symbol"},
         {"name": "side", "type": "string", "required": True, "description": "buy / sell"},
-        {"name": "count", "type": "int", "required": False, "default": 1, "description": "Number of shares"},
-        {"name": "market_order", "type": "bool", "required": False, "default": True, "description": "Market order if True"}
+        {"name": "qty", "type": "int", "required": True, "description": "Quantity"},
+        {"name": "market_order", "type": "bool", "required": False, "default": True, "description": "Market order"},
+        {"name": "limit_price", "type": "float", "required": False, "default": 0, "description": "Limit price"},
+        {"name": "stop_price", "type": "float", "required": False, "default": 0, "description": "Stop price"},
+        {"name": "expiry", "type": "string", "required": False, "default": "day", "description": "day / ext / gtc"}
     ]},
-    {"name": "tradernet_api.get_orders", "display_name": "Get Orders", "category": "orders", "category_display": "Orders", "library": "tradernet_api", "method": "get_orders", "params": [
-        {"name": "active_only", "type": "bool", "required": False, "default": True, "description": "Show only active"}
+    {"name": "getNotifyOrderJson", "display_name": "Get Orders", "category": "orders", "category_display": "Orders", "library": "raw_v2", "cmd": "getNotifyOrderJson", "params": [
+        {"name": "active_only", "type": "bool", "required": False, "default": True, "description": "Show only active orders"}
     ]},
-    {"name": "tradernet_api.delete_order", "display_name": "Delete Order", "category": "orders", "category_display": "Orders", "library": "tradernet_api", "method": "delete_order", "params": [
-        {"name": "order_id", "type": "string", "required": True, "description": "Order ID"}
+    {"name": "delTradeOrder", "display_name": "Delete Order", "category": "orders", "category_display": "Orders", "library": "raw_v2", "cmd": "delTradeOrder", "params": [
+        {"name": "order_id", "type": "string", "required": True, "description": "Order ID to delete"}
     ]},
-    {"name": "tradernet_api.set_stop_order", "display_name": "Set Stop Loss / Take Profit", "category": "orders", "category_display": "Orders", "library": "tradernet_api", "method": "set_stop_order", "params": [
+    {"name": "putStopLoss", "display_name": "Stop Loss / Take Profit", "category": "orders", "category_display": "Orders", "library": "raw_v2", "cmd": "putStopLoss", "params": [
         {"name": "ticker", "type": "string", "required": True, "description": "Ticker symbol"},
         {"name": "stop_loss", "type": "float", "required": False, "default": 0, "description": "Stop loss price"},
         {"name": "take_profit", "type": "float", "required": False, "default": 0, "description": "Take profit price"}
     ]},
     # --- Raw API ---
-    {"name": "raw_v2", "display_name": "Raw API Command (V2)", "category": "advanced", "category_display": "Advanced", "library": "raw_v2", "method": "", "params": [
-        {"name": "cmd", "type": "string", "required": True, "description": "API command name (e.g. getSecurityInfo, getMarketStatus)"},
+    {"name": "raw_v2_custom", "display_name": "Raw API Command (V2)", "category": "advanced", "category_display": "Advanced", "library": "raw_v2", "cmd": "", "params": [
+        {"name": "cmd", "type": "string", "required": True, "description": "API command name (e.g. getSecurityInfo, getMarketStatus, getOPQ, putTradeOrder, getNotifyOrderJson, delTradeOrder, putStopLoss)"},
         {"name": "params", "type": "json", "required": False, "default": "{}", "description": "JSON parameters"}
     ]},
 ]
@@ -709,8 +714,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
                 elif library == 'raw_v2':
                     nonce = int(time.time() * 10000)
-                    cmd = command_def.get('cmd', '') or cmd_params.get('cmd', '')
-                    raw_params = command_def.get('cmd') and cmd_params or cmd_params.get('params', {})
+                    if command_def.get('cmd'):
+                        cmd = command_def['cmd']
+                        raw_params = cmd_params
+                    else:
+                        cmd = cmd_params.get('cmd', '')
+                        raw_params = cmd_params.get('params', {})
 
                     if not cmd:
                         self.send_json({'error': 'cmd is required for raw_v2'}, 400)
