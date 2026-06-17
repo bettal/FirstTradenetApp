@@ -215,6 +215,36 @@ COMMANDS_REGISTRY = [
     ]},
 ]
 
+def _api_auth_request(command, params, public_key, private_key, api_base="https://tradernet.am"):
+    """Make API request using auth method from /auth-api page.
+    
+    POST body: JSON params
+    Headers: X-NtApi-PublicKey, X-NtApi-Timestamp, X-NtApi-Sig
+    Signature: HMAC-SHA256(privateKey, json_body + timestamp)
+    """
+    timestamp = int(time.time())
+    json_body = json.dumps(params) if params else ''
+    signature = hmac.new(
+        private_key.encode('utf-8'),
+        (json_body + str(timestamp)).encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+
+    headers = {
+        'X-NtApi-PublicKey': public_key,
+        'X-NtApi-Sig': signature,
+        'X-NtApi-Timestamp': str(timestamp),
+        'Content-Type': 'application/json',
+    }
+
+    url = f"{api_base}/api/{command}"
+    data = json_body.encode('utf-8') if json_body else None
+
+    req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read().decode('utf-8'))
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory="static", **kwargs)
@@ -488,7 +518,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
             conn = get_db()
             c = conn.cursor()
-            c.execute('SELECT api_key, secret_key, login, password FROM wallets WHERE id = %s AND user_id = %s', (wallet_id, user['id']))
+            c.execute('SELECT api_key, secret_key FROM wallets WHERE id = %s AND user_id = %s', (wallet_id, user['id']))
             wallet = c.fetchone()
             conn.close()
 
@@ -508,103 +538,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({'error': 'Decryption failed'}, 500)
                 return
 
-            wallet_login = wallet[2] or ''
-            wallet_password = wallet[3] or ''
-
-            api_base = "https://tradernet.am"
-
-            def v1_request(command, sid, req_params):
-                """Make v1 API call with SID auth."""
-                payload = json.dumps({"cmd": command, "SID": sid, "params": req_params})
-                req = urllib.request.Request(
-                    f"{api_base}/api/",
-                    data=f"q={urllib.parse.quote(payload)}".encode('utf-8'),
-                    method='POST'
-                )
-                with urllib.request.urlopen(req) as resp:
-                    return json.loads(resp.read().decode('utf-8'))
-
-            def v2_request(command, req_params):
-                """Make v2 API call with apiKey+nonce+signature."""
-                nonce = int(time.time() * 10000)
-
-                def flatten_params(data, root_name=''):
-                    result = []
-                    for key, value in sorted(data.items()):
-                        if isinstance(value, dict):
-                            result.extend(flatten_params(value, key))
-                        else:
-                            full_key = f"{root_name}[{key}]" if root_name else key
-                            result.append(f"{full_key}={value}")
-                    return result
-
-                def to_query_string(data):
-                    parts = []
-                    for key, value in sorted(data.items()):
-                        if isinstance(value, dict):
-                            parts.append(f"{key}={to_query_string(value)}")
-                        else:
-                            parts.append(f"{key}={value}")
-                    return "&".join(parts)
-
-                api_data = {"cmd": command, "nonce": nonce, "apiKey": public_key}
-                if req_params:
-                    api_data["params"] = req_params
-
-                query_string = to_query_string(api_data)
-                signature = hmac.new(
-                    private_key.encode('utf-8'),
-                    query_string.encode('utf-8'),
-                    hashlib.sha256
-                ).hexdigest()
-
-                body_parts = flatten_params(api_data)
-                body_str = "&".join(body_parts)
-
-                headers = {
-                    'X-NtApi-Sig': signature,
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                }
-
-                req = urllib.request.Request(
-                    f"{api_base}/api/v2/cmd/{urllib.parse.quote(command, safe='')}",
-                    data=body_str.encode('utf-8'),
-                    headers=headers,
-                    method='POST'
-                )
-                with urllib.request.urlopen(req) as resp:
-                    return json.loads(resp.read().decode('utf-8'))
-
-            def v1_auth_and_request(command, req_params):
-                """Authenticate with login/password via v1 API, then make request."""
-                # Step 1: authByLogin
-                auth_payload = json.dumps({
-                    "cmd": "authByLogin",
-                    "params": {
-                        "login": wallet_login,
-                        "password": wallet_password,
-                        "rememberMe": 1
-                    }
-                })
-                auth_req = urllib.request.Request(
-                    f"{api_base}/api/",
-                    data=f"q={urllib.parse.quote(auth_payload)}".encode('utf-8'),
-                    method='POST'
-                )
-                with urllib.request.urlopen(auth_req) as auth_resp:
-                    auth_data = json.loads(auth_resp.read().decode('utf-8'))
-
-                if not auth_data.get('SID'):
-                    raise Exception(f"Auth failed: {auth_data.get('errMsg', 'No SID')}")
-
-                # Step 2: make the actual request with SID
-                return v1_request(command, auth_data['SID'], req_params)
-
             try:
-                if wallet_login and wallet_password:
-                    result = v1_auth_and_request(cmd, params)
-                else:
-                    result = v2_request(cmd, params)
+                result = _api_auth_request(cmd, params, public_key, private_key)
                 self.send_json(result)
             except urllib.error.HTTPError as e:
                 try:
@@ -703,7 +638,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
             conn = get_db()
             c = conn.cursor()
-            c.execute('SELECT api_key, secret_key, login, password FROM wallets WHERE id = %s AND user_id = %s', (wallet_id, user['id']))
+            c.execute('SELECT api_key, secret_key FROM wallets WHERE id = %s AND user_id = %s', (wallet_id, user['id']))
             wallet = c.fetchone()
             conn.close()
 
@@ -722,69 +657,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             except Exception:
                 self.send_json({'error': 'Decryption failed'}, 500)
                 return
-
-            wallet_login = wallet[2] or ''
-            wallet_password = wallet[3] or ''
-            api_base = "https://tradernet.am"
-
-            def _v1_request(v1_cmd, sid, req_params):
-                payload = json.dumps({"cmd": v1_cmd, "SID": sid, "params": req_params})
-                req = urllib.request.Request(
-                    f"{api_base}/api/",
-                    data=f"q={urllib.parse.quote(payload)}".encode('utf-8'),
-                    method='POST'
-                )
-                with urllib.request.urlopen(req) as resp:
-                    return json.loads(resp.read().decode('utf-8'))
-
-            def _v2_request(v2_cmd, req_params):
-                nonce = int(time.time() * 10000)
-                def _flatten_params(data, root_name=''):
-                    result = []
-                    for key, value in sorted(data.items()):
-                        if isinstance(value, dict):
-                            result.extend(_flatten_params(value, key))
-                        else:
-                            full_key = f"{root_name}[{key}]" if root_name else key
-                            result.append(f"{full_key}={value}")
-                    return result
-                def _to_query_string(data):
-                    parts = []
-                    for key, value in sorted(data.items()):
-                        if isinstance(value, dict):
-                            parts.append(f"{key}={_to_query_string(value)}")
-                        else:
-                            parts.append(f"{key}={value}")
-                    return "&".join(parts)
-                api_data = {"cmd": v2_cmd, "nonce": nonce, "apiKey": public_key}
-                if req_params:
-                    api_data["params"] = req_params
-                query_string = _to_query_string(api_data)
-                signature = hmac.new(private_key.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
-                body_str = "&".join(_flatten_params(api_data))
-                headers = {'X-NtApi-Sig': signature, 'Content-Type': 'application/x-www-form-urlencoded'}
-                req = urllib.request.Request(
-                    f"{api_base}/api/v2/cmd/{urllib.parse.quote(v2_cmd, safe='')}",
-                    data=body_str.encode('utf-8'), headers=headers, method='POST'
-                )
-                with urllib.request.urlopen(req) as resp:
-                    return json.loads(resp.read().decode('utf-8'))
-
-            def _v1_auth_and_request(v1_cmd, req_params):
-                auth_payload = json.dumps({
-                    "cmd": "authByLogin",
-                    "params": {"login": wallet_login, "password": wallet_password, "rememberMe": 1}
-                })
-                auth_req = urllib.request.Request(
-                    f"{api_base}/api/",
-                    data=f"q={urllib.parse.quote(auth_payload)}".encode('utf-8'),
-                    method='POST'
-                )
-                with urllib.request.urlopen(auth_req) as auth_resp:
-                    auth_data = json.loads(auth_resp.read().decode('utf-8'))
-                if not auth_data.get('SID'):
-                    raise Exception(f"Auth failed: {auth_data.get('errMsg', 'No SID')}")
-                return _v1_request(v1_cmd, auth_data['SID'], req_params)
 
             try:
                 library = command_def['library']
@@ -809,10 +681,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         self.send_json({'error': 'cmd is required for raw_v2'}, 400)
                         return
 
-                    if wallet_login and wallet_password:
-                        result = _v1_auth_and_request(cmd, raw_params)
-                    else:
-                        result = _v2_request(cmd, raw_params)
+                    result = _api_auth_request(cmd, raw_params, public_key, private_key)
                     self.send_json(result)
 
                 else:
