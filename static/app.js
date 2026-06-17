@@ -165,7 +165,7 @@ function initDashboard() {
         }
 
         walletsContainer.innerHTML = wallets.map(w => `
-            <div class="glass-panel wallet-card" data-id="${w.id}" data-name="${w.name}" data-api-key="${w.api_key}" style="position: relative;">
+            <div class="glass-panel wallet-card" data-id="${w.id}" data-name="${w.name}" data-api-key="${w.api_key}" data-login="${w.login || ''}" style="position: relative;">
                 <div style="position: absolute; top: 1rem; right: 1rem; display: flex; gap: 0.25rem;">
                     <button class="btn-show-secret" data-id="${w.id}" style="background: transparent; color: var(--accent-color); padding: 0.25rem; width: auto; border: 1px solid var(--accent-color); border-radius: 4px; display: flex; align-items: center; justify-content: center;" title="Show Secret Key">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
@@ -190,6 +190,7 @@ function initDashboard() {
                     <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #10b981;"></span>
                 </div>
                 <div class="wallet-api-key">${w.api_key.substring(0, 8)}••••••••••••</div>
+                ${w.login ? `<div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem;">${w.login}</div>` : ''}
                 <div style="margin-top: 1rem; text-align: center; font-size: 0.75rem; color: var(--accent-color);">Click to Open API Explorer</div>
             </div>
         `).join('');
@@ -630,6 +631,8 @@ function initDashboard() {
         const name = document.getElementById('wallet-name').value;
         const apiKey = document.getElementById('api-key').value;
         const secretKey = document.getElementById('secret-key').value;
+        const login = document.getElementById('login').value;
+        const password = document.getElementById('password').value;
         const errorDiv = document.getElementById('wallet-error');
         errorDiv.classList.add('hidden');
 
@@ -637,7 +640,7 @@ function initDashboard() {
             const res = await fetch('/api/wallets', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, apiKey, secretKey })
+                body: JSON.stringify({ name, apiKey, secretKey, login, password })
             });
             const data = await res.json();
 
