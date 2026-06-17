@@ -178,91 +178,34 @@ class TradeManager:
 
 COMMANDS_REGISTRY = [
     # --- Market Data ---
-    {"name": "tradernet.get_quotes", "display_name": "Get Quotes", "category": "market_data", "category_display": "Market Data", "library": "tradernet", "method": "get_quotes", "params": [
-        {"name": "symbols", "type": "string", "required": True, "description": "Ticker symbol(s), comma-separated"}
+    {"name": "tradernet_api.get_ticker_info", "display_name": "Ticker Info", "category": "market_data", "category_display": "Market Data", "library": "tradernet_api", "method": "get_ticker_info", "params": [
+        {"name": "ticker", "type": "string", "required": True, "description": "Ticker symbol"},
+        {"name": "sup", "type": "bool", "required": False, "default": False, "description": "Extended info"}
     ]},
-    {"name": "tradernet.security_info", "display_name": "Security Info", "category": "market_data", "category_display": "Market Data", "library": "tradernet", "method": "security_info", "params": [
-        {"name": "symbol", "type": "string", "required": True, "description": "Ticker symbol (e.g. AAPL.US)"},
-        {"name": "sup", "type": "bool", "required": False, "default": True, "description": "IMS and trading system format"}
-    ]},
-    {"name": "tradernet.get_candles", "display_name": "Get Candles", "category": "market_data", "category_display": "Market Data", "library": "tradernet", "method": "get_candles", "params": [
-        {"name": "symbol", "type": "string", "required": True, "description": "Ticker symbol"},
-        {"name": "timeframe", "type": "int", "required": False, "default": 86400, "description": "Candle interval in seconds (86400=daily)"}
-    ]},
-    {"name": "tradernet.find_symbol", "display_name": "Find Symbol", "category": "market_data", "category_display": "Market Data", "library": "tradernet", "method": "find_symbol", "params": [
-        {"name": "symbol", "type": "string", "required": True, "description": "Symbol name to search"},
-        {"name": "exchange", "type": "string", "required": False, "default": "", "description": "Exchange filter (optional)"}
-    ]},
-    {"name": "tradernet.get_most_traded", "display_name": "Most Traded", "category": "market_data", "category_display": "Market Data", "library": "tradernet", "method": "get_most_traded", "params": [
-        {"name": "instrument_type", "type": "string", "required": False, "default": "stocks", "description": "stocks / etf / etc"},
-        {"name": "exchange", "type": "string", "required": False, "default": "usa", "description": "usa / europe / ukraine / currencies"},
-        {"name": "gainers", "type": "bool", "required": False, "default": True, "description": "True=gainers, False=top volume"},
-        {"name": "limit", "type": "int", "required": False, "default": 10, "description": "Number of results"}
+    {"name": "raw.getMarketStatus", "display_name": "Market Status", "category": "market_data", "category_display": "Market Data", "library": "raw_v2", "method": "", "cmd": "getMarketStatus", "params": [
+        {"name": "market", "type": "string", "required": False, "default": "*", "description": "Market code"}
     ]},
     # --- Orders ---
-    {"name": "tradernet.get_placed", "display_name": "Get Active Orders", "category": "orders", "category_display": "Orders", "library": "tradernet", "method": "get_placed", "params": [
-        {"name": "active", "type": "bool", "required": False, "default": True, "description": "Show only active orders"}
-    ]},
-    {"name": "tradernet.get_historical", "display_name": "Order History", "category": "orders", "category_display": "Orders", "library": "tradernet", "method": "get_historical", "params": []},
-    {"name": "tradernet.get_trades_history", "display_name": "Trades History", "category": "orders", "category_display": "Orders", "library": "tradernet", "method": "get_trades_history", "params": [
-        {"name": "symbol", "type": "string", "required": False, "default": "", "description": "Filter by ticker"}
-    ]},
-    {"name": "tradernet.buy", "display_name": "Buy Order", "category": "orders", "category_display": "Orders", "library": "tradernet", "method": "buy", "params": [
-        {"name": "symbol", "type": "string", "required": True, "description": "Ticker symbol"},
-        {"name": "quantity", "type": "int", "required": False, "default": 1, "description": "Number of shares"},
-        {"name": "price", "type": "float", "required": False, "default": 0.0, "description": "Limit price (0=market)"}
-    ]},
-    {"name": "tradernet.sell", "display_name": "Sell Order", "category": "orders", "category_display": "Orders", "library": "tradernet", "method": "sell", "params": [
-        {"name": "symbol", "type": "string", "required": True, "description": "Ticker symbol"},
-        {"name": "quantity", "type": "int", "required": False, "default": 1, "description": "Number of shares"},
-        {"name": "price", "type": "float", "required": False, "default": 0.0, "description": "Limit price (0=market)"}
-    ]},
-    {"name": "tradernet.cancel", "display_name": "Cancel Order", "category": "orders", "category_display": "Orders", "library": "tradernet", "method": "cancel", "params": [
-        {"name": "order_id", "type": "int", "required": True, "description": "Order ID to cancel"}
-    ]},
-    {"name": "tradernet.stop", "display_name": "Stop Loss", "category": "orders", "category_display": "Orders", "library": "tradernet", "method": "stop", "params": [
-        {"name": "symbol", "type": "string", "required": True, "description": "Ticker symbol"},
-        {"name": "price", "type": "float", "required": True, "description": "Stop loss price"}
-    ]},
-    {"name": "tradernet.take_profit", "display_name": "Take Profit", "category": "orders", "category_display": "Orders", "library": "tradernet", "method": "take_profit", "params": [
-        {"name": "symbol", "type": "string", "required": True, "description": "Ticker symbol"},
-        {"name": "price", "type": "float", "required": True, "description": "Take profit price"}
-    ]},
-    # --- Third-party API ---
-    {"name": "tradernet_api.send_order", "display_name": "Send Order (3rd-party)", "category": "orders", "category_display": "Orders", "library": "tradernet_api", "method": "send_order", "params": [
+    {"name": "tradernet_api.send_order", "display_name": "Send Order", "category": "orders", "category_display": "Orders", "library": "tradernet_api", "method": "send_order", "params": [
         {"name": "ticker", "type": "string", "required": True, "description": "Ticker symbol (e.g. AAPL)"},
         {"name": "side", "type": "string", "required": True, "description": "buy / sell"},
         {"name": "count", "type": "int", "required": False, "default": 1, "description": "Number of shares"},
         {"name": "market_order", "type": "bool", "required": False, "default": True, "description": "Market order if True"}
     ]},
-    {"name": "tradernet_api.get_orders", "display_name": "Get Orders (3rd-party)", "category": "orders", "category_display": "Orders", "library": "tradernet_api", "method": "get_orders", "params": [
+    {"name": "tradernet_api.get_orders", "display_name": "Get Orders", "category": "orders", "category_display": "Orders", "library": "tradernet_api", "method": "get_orders", "params": [
         {"name": "active_only", "type": "bool", "required": False, "default": True, "description": "Show only active"}
     ]},
-    {"name": "tradernet_api.delete_order", "display_name": "Delete Order (3rd-party)", "category": "orders", "category_display": "Orders", "library": "tradernet_api", "method": "delete_order", "params": [
+    {"name": "tradernet_api.delete_order", "display_name": "Delete Order", "category": "orders", "category_display": "Orders", "library": "tradernet_api", "method": "delete_order", "params": [
         {"name": "order_id", "type": "string", "required": True, "description": "Order ID"}
     ]},
-    {"name": "tradernet_api.get_ticker_info", "display_name": "Ticker Info (3rd-party)", "category": "market_data", "category_display": "Market Data", "library": "tradernet_api", "method": "get_ticker_info", "params": [
-        {"name": "ticker", "type": "string", "required": True, "description": "Ticker symbol"},
-        {"name": "sup", "type": "bool", "required": False, "default": False, "description": "Extended info"}
-    ]},
-    {"name": "tradernet_api.set_stop_order", "display_name": "Set Stop Order (3rd-party)", "category": "orders", "category_display": "Orders", "library": "tradernet_api", "method": "set_stop_order", "params": [
+    {"name": "tradernet_api.set_stop_order", "display_name": "Set Stop Loss / Take Profit", "category": "orders", "category_display": "Orders", "library": "tradernet_api", "method": "set_stop_order", "params": [
         {"name": "ticker", "type": "string", "required": True, "description": "Ticker symbol"},
         {"name": "stop_loss", "type": "float", "required": False, "default": 0, "description": "Stop loss price"},
         {"name": "take_profit", "type": "float", "required": False, "default": 0, "description": "Take profit price"}
     ]},
-    # --- Portfolio ---
-    {"name": "tradernet.account_summary", "display_name": "Account Summary", "category": "portfolio", "category_display": "Portfolio", "library": "tradernet", "method": "account_summary", "params": []},
-    {"name": "tradernet.get_user_data", "display_name": "User Data (OPQ)", "category": "portfolio", "category_display": "Portfolio", "library": "tradernet", "method": "get_user_data", "params": []},
-    {"name": "tradernet.get_market_status", "display_name": "Market Status", "category": "portfolio", "category_display": "Portfolio", "library": "tradernet", "method": "get_market_status", "params": [
-        {"name": "market", "type": "string", "required": False, "default": "*", "description": "Market code"}
-    ]},
-    # --- Alerts ---
-    {"name": "tradernet.get_price_alerts", "display_name": "Get Price Alerts", "category": "alerts", "category_display": "Alerts", "library": "tradernet", "method": "get_price_alerts", "params": [
-        {"name": "symbol", "type": "string", "required": False, "default": "", "description": "Filter by ticker"}
-    ]},
     # --- Raw API ---
     {"name": "raw_v2", "display_name": "Raw API Command (V2)", "category": "advanced", "category_display": "Advanced", "library": "raw_v2", "method": "", "params": [
-        {"name": "cmd", "type": "string", "required": True, "description": "API command name (e.g. getSecurityInfo)"},
+        {"name": "cmd", "type": "string", "required": True, "description": "API command name (e.g. getSecurityInfo, getMarketStatus)"},
         {"name": "params", "type": "json", "required": False, "default": "{}", "description": "JSON parameters"}
     ]},
 ]
@@ -734,18 +677,28 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({'error': 'Decryption failed'}, 500)
                 return
 
+            def _flatten_params(data, root_name=''):
+                result = []
+                for key, value in sorted(data.items()):
+                    if isinstance(value, dict):
+                        result.extend(_flatten_params(value, key))
+                    else:
+                        full_key = f"{root_name}[{key}]" if root_name else key
+                        result.append(f"{full_key}={value}")
+                return result
+
+            def _to_query_string(data):
+                parts = []
+                for key, value in sorted(data.items()):
+                    if isinstance(value, dict):
+                        parts.append(f"{key}={_to_query_string(value)}")
+                    else:
+                        parts.append(f"{key}={value}")
+                return "&".join(parts)
+
             try:
                 library = command_def['library']
-                if library == 'tradernet':
-                    if not OfficialSDK:
-                        self.send_json({'error': 'Official SDK not available'}, 500)
-                        return
-                    api = OfficialSDK(public=public_key, private=private_key)
-                    method = getattr(api, command_def['method'])
-                    result = method(**cmd_params)
-                    self.send_json(result)
-
-                elif library == 'tradernet_api':
+                if library == 'tradernet_api':
                     if not ThirdPartyAPI:
                         self.send_json({'error': 'Third-party API not available'}, 500)
                         return
@@ -756,36 +709,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
                 elif library == 'raw_v2':
                     nonce = int(time.time() * 10000)
-                    cmd = cmd_params.get('cmd', '')
-                    raw_params = cmd_params.get('params', {})
+                    cmd = command_def.get('cmd', '') or cmd_params.get('cmd', '')
+                    raw_params = command_def.get('cmd') and cmd_params or cmd_params.get('params', {})
 
                     if not cmd:
                         self.send_json({'error': 'cmd is required for raw_v2'}, 400)
                         return
 
-                    def flatten_params(data, root_name=''):
-                        result = []
-                        for key, value in sorted(data.items()):
-                            if isinstance(value, dict):
-                                result.extend(flatten_params(value, key))
-                            else:
-                                full_key = f"{root_name}[{key}]" if root_name else key
-                                result.append(f"{full_key}={value}")
-                        return result
-
-                    def to_query_string(data):
-                        parts = []
-                        for key, value in sorted(data.items()):
-                            if isinstance(value, dict):
-                                parts.append(f"{key}={to_query_string(value)}")
-                            else:
-                                parts.append(f"{key}={value}")
-                        return "&".join(parts)
-
                     api_data = {"cmd": cmd, "params": raw_params, "nonce": nonce, "apiKey": public_key}
-                    query_string = to_query_string(api_data)
+                    query_string = _to_query_string(api_data)
                     signature = hmac.new(private_key.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
-                    body_str = "&".join(flatten_params(api_data))
+                    body_str = "&".join(_flatten_params(api_data))
                     headers = {'X-NtApi-Sig': signature, 'Content-Type': 'application/x-www-form-urlencoded'}
                     api_url = f"https://tradernet.ru/api/v2/cmd/{urllib.parse.quote(cmd, safe='')}"
 
