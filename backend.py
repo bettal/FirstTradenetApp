@@ -1,5 +1,6 @@
 import http.server
 import socketserver
+import threading
 import json
 import os
 import uuid
@@ -27,6 +28,7 @@ except ImportError:
     ThirdPartyAPI = None
 
 IN_MEMORY_SESSIONS = {}
+TFA_VERIFY_TIMEOUT = 300  # 5 minutes
 
 def hash_password(password: str) -> str:
     """Hash a password securely using bcrypt."""
@@ -300,6 +302,44 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_json(COMMANDS_REGISTRY)
             return
 
+        # API Route: Get Wallet Secret Key
+        if self.path.startswith('/api/wallets/secret'):
+            user = self.get_user_from_session()
+            if not user:
+                self.send_json({'error': 'Unauthorized'}, 401)
+                return
+            if not self._require_2fa_verified(user):
+                return
+
+            parsed = urllib.parse.urlparse(self.path)
+            qs = urllib.parse.parse_qs(parsed.query)
+            wallet_id = qs.get('id', [None])[0]
+            if not wallet_id:
+                self.send_json({'error': 'Missing wallet id'}, 400)
+                return
+
+            if not user.get('encryption_key'):
+                self.send_json({'error': 'Encryption key missing, please re-login'}, 401)
+                return
+
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('SELECT name, api_key, secret_key FROM wallets WHERE id = %s AND user_id = %s', (wallet_id, user['id']))
+            wallet = c.fetchone()
+            conn.close()
+
+            if not wallet:
+                self.send_json({'error': 'Wallet not found'}, 404)
+                return
+
+            try:
+                f = Fernet(user['encryption_key'])
+                decrypted = f.decrypt(wallet[2].encode('utf-8')).decode('utf-8')
+                self.send_json({'name': wallet[0], 'api_key': wallet[1], 'secret_key': decrypted})
+            except Exception:
+                self.send_json({'error': 'Decryption failed'}, 500)
+            return
+
         return super().do_GET()
 
     def do_POST(self):
@@ -373,6 +413,31 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             else:
                 self.send_json({'error': 'Invalid code or password'}, 401)
                 
+        elif self.path == '/api/auth/reverify-2fa':
+            user = self.get_user_from_session()
+            if not user:
+                self.send_json({'error': 'Unauthorized'}, 401)
+                return
+
+            code = data.get('code')
+            if not code:
+                self.send_json({'error': 'Missing 2FA code'}, 400)
+                return
+
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('SELECT totp_secret FROM users WHERE id = %s', (user['id'],))
+            row = c.fetchone()
+            conn.close()
+
+            if row and row[0] and verify_totp(row[0], code):
+                token = SimpleCookie(self.headers.get('Cookie', '')).get('session_token').value if 'Cookie' in self.headers else None
+                if token and token in IN_MEMORY_SESSIONS:
+                    IN_MEMORY_SESSIONS[token]['2fa_verified_at'] = time.time()
+                self.send_json({'success': True, 'message': '2FA verified'})
+            else:
+                self.send_json({'error': 'Invalid code'}, 401)
+
         elif self.path == '/api/auth/setup-2fa':
             user = self.get_user_from_session()
             if not user:
@@ -781,6 +846,84 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def _require_2fa_verified(self, user):
+        now = time.time()
+        last = user.get('2fa_verified_at')
+        if last is None or (now - last) > TFA_VERIFY_TIMEOUT:
+            self.send_json({'error': '2FA verification required', 'code': '2FA_REQUIRED'}, 401)
+            return False
+        return True
+
+    def do_PUT(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length > 0:
+            put_data = self.rfile.read(content_length)
+            try:
+                data = json.loads(put_data.decode('utf-8'))
+            except json.JSONDecodeError:
+                data = {}
+        else:
+            data = {}
+
+        if self.path == '/api/wallets':
+            user = self.get_user_from_session()
+            if not user:
+                self.send_json({'error': 'Unauthorized'}, 401)
+                return
+
+            if not self._require_2fa_verified(user):
+                return
+
+            wallet_id = data.get('id')
+            name = data.get('name')
+            api_key = data.get('apiKey')
+            secret_key = data.get('secretKey')
+
+            if not wallet_id:
+                self.send_json({'error': 'Missing wallet ID'}, 400)
+                return
+
+            if not user.get('encryption_key'):
+                self.send_json({'error': 'Encryption key missing, please re-login'}, 401)
+                return
+
+            updates = []
+            values = []
+            if name is not None:
+                updates.append('name = %s')
+                values.append(name)
+            if api_key is not None:
+                updates.append('api_key = %s')
+                values.append(api_key)
+            if secret_key is not None:
+                f = Fernet(user['encryption_key'])
+                encrypted = f.encrypt(secret_key.encode('utf-8')).decode('utf-8')
+                updates.append('secret_key = %s')
+                values.append(encrypted)
+
+            if not updates:
+                self.send_json({'error': 'Nothing to update'}, 400)
+                return
+
+            values.append(wallet_id)
+            values.append(user['id'])
+
+            conn = get_db()
+            c = conn.cursor()
+            sql = f"UPDATE wallets SET {', '.join(updates)} WHERE id = %s AND user_id = %s"
+            c.execute(sql, values)
+            conn.commit()
+            updated = c.rowcount
+            conn.close()
+
+            if updated > 0:
+                self.send_json({'success': True, 'message': 'Wallet updated'})
+            else:
+                self.send_json({'error': 'Wallet not found'}, 404)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def send_json(self, data, status=200):
         self.send_response(status)
         self.send_header('Content-type', 'application/json')
@@ -800,7 +943,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         encryption_key = base64.urlsafe_b64encode(kdf.derive(password.encode('utf-8')))
         
         session_token = str(uuid.uuid4())
-        IN_MEMORY_SESSIONS[session_token] = encryption_key
+        IN_MEMORY_SESSIONS[session_token] = {'encryption_key': encryption_key, '2fa_verified_at': None}
 
         conn = get_db()
         c = conn.cursor()
@@ -830,12 +973,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 user = c.fetchone()
                 conn.close()
                 if user:
-                    encryption_key = IN_MEMORY_SESSIONS.get(token)
-                    return {'id': user[0], 'phone': user[1], 'totp_enabled': user[2], 'encryption_key': encryption_key}
+                    session_data = IN_MEMORY_SESSIONS.get(token, {})
+                    return {
+                        'id': user[0],
+                        'phone': user[1],
+                        'totp_enabled': user[2],
+                        'encryption_key': session_data.get('encryption_key'),
+                        '2fa_verified_at': session_data.get('2fa_verified_at'),
+                    }
         return None
 
 if __name__ == "__main__":
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+    with socketserver.ThreadingTCPServer(("", PORT), Handler) as httpd:
+        httpd.allow_reuse_address = True
         print(f"Serving at port {PORT}")
         httpd.serve_forever()

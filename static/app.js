@@ -165,10 +165,18 @@ function initDashboard() {
         }
 
         walletsContainer.innerHTML = wallets.map(w => `
-            <div class="glass-panel wallet-card" data-id="${w.id}" data-name="${w.name}" style="position: relative;">
-                <button class="btn-delete-wallet" data-id="${w.id}" style="position: absolute; top: 1rem; right: 1rem; background: transparent; color: var(--error-color); padding: 0.25rem; width: auto; border: 1px solid var(--error-color); border-radius: 4px; display: flex; align-items: center; justify-content: center;" title="Delete Wallet">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2M10 11v6M14 11v6"/></svg>
-                </button>
+            <div class="glass-panel wallet-card" data-id="${w.id}" data-name="${w.name}" data-api-key="${w.api_key}" style="position: relative;">
+                <div style="position: absolute; top: 1rem; right: 1rem; display: flex; gap: 0.25rem;">
+                    <button class="btn-show-secret" data-id="${w.id}" style="background: transparent; color: var(--accent-color); padding: 0.25rem; width: auto; border: 1px solid var(--accent-color); border-radius: 4px; display: flex; align-items: center; justify-content: center;" title="Show Secret Key">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                    </button>
+                    <button class="btn-edit-wallet" data-id="${w.id}" style="background: transparent; color: var(--text-main); padding: 0.25rem; width: auto; border: 1px solid var(--glass-border); border-radius: 4px; display: flex; align-items: center; justify-content: center;" title="Edit Wallet">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                    </button>
+                    <button class="btn-delete-wallet" data-id="${w.id}" style="background: transparent; color: var(--error-color); padding: 0.25rem; width: auto; border: 1px solid var(--error-color); border-radius: 4px; display: flex; align-items: center; justify-content: center;" title="Delete Wallet">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2M10 11v6M14 11v6"/></svg>
+                    </button>
+                </div>
                 <div class="wallet-icon">
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M20 12V8H6a2 2 0 0 1-2-2c0-1.1.9-2 2-2h12v4"/>
@@ -334,6 +342,138 @@ function initDashboard() {
         renderParams(cmdDef);
     });
 
+    // --- 2FA Verify Modal Logic ---
+    const tfaVerifyModal = document.getElementById('tfa-verify-modal');
+    const btnCloseTfaVerify = document.getElementById('btn-close-tfa-verify');
+    const tfaVerifyForm = document.getElementById('tfa-verify-form');
+    let pending2faAction = null;
+
+    function closeTfaVerify() {
+        tfaVerifyModal.classList.remove('active');
+        tfaVerifyForm.reset();
+        document.getElementById('tfa-verify-error').classList.add('hidden');
+        pending2faAction = null;
+    }
+
+    btnCloseTfaVerify.addEventListener('click', closeTfaVerify);
+    tfaVerifyModal.addEventListener('click', (e) => {
+        if (e.target === tfaVerifyModal) closeTfaVerify();
+    });
+
+    tfaVerifyForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const code = document.getElementById('tfa-verify-code').value;
+        const errorDiv = document.getElementById('tfa-verify-error');
+        errorDiv.classList.add('hidden');
+
+        try {
+            const res = await fetch('/api/auth/reverify-2fa', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code })
+            });
+            const data = await res.json();
+
+            if (res.ok) {
+                const action = pending2faAction;
+                closeTfaVerify();
+                if (action) action();
+            } else {
+                errorDiv.textContent = data.error || 'Invalid code';
+                errorDiv.classList.remove('hidden');
+            }
+        } catch (err) {
+            errorDiv.textContent = 'Network error';
+            errorDiv.classList.remove('hidden');
+        }
+    });
+
+    // --- Edit Wallet Modal Logic ---
+    const editWalletModal = document.getElementById('edit-wallet-modal');
+    const btnCloseEditModal = document.getElementById('btn-close-edit-modal');
+    const editWalletForm = document.getElementById('edit-wallet-form');
+
+    const btnToggleSecret = document.getElementById('btn-toggle-secret');
+    const editSecretKeyInput = document.getElementById('edit-secret-key');
+    const toggleSecretIcon = document.getElementById('toggle-secret-icon');
+
+    btnToggleSecret.addEventListener('click', () => {
+        const isPassword = editSecretKeyInput.type === 'password';
+        editSecretKeyInput.type = isPassword ? 'text' : 'password';
+        toggleSecretIcon.innerHTML = isPassword
+            ? '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>'
+            : '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>';
+    });
+
+    function closeEditModal() {
+        editWalletModal.classList.remove('active');
+        editWalletForm.reset();
+        document.getElementById('edit-wallet-error').classList.add('hidden');
+        // Reset to password mode
+        editSecretKeyInput.type = 'password';
+        toggleSecretIcon.innerHTML = '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>';
+    }
+
+    btnCloseEditModal.addEventListener('click', closeEditModal);
+    editWalletModal.addEventListener('click', (e) => {
+        if (e.target === editWalletModal) closeEditModal();
+    });
+
+    editWalletForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const id = document.getElementById('edit-wallet-id').value;
+        const name = document.getElementById('edit-wallet-name').value;
+        const apiKey = document.getElementById('edit-api-key').value;
+        const secretKey = document.getElementById('edit-secret-key').value;
+        const errorDiv = document.getElementById('edit-wallet-error');
+        errorDiv.classList.add('hidden');
+
+        const body = { id, name, apiKey };
+        if (secretKey) body.secretKey = secretKey;
+
+        try {
+            const res = await fetch('/api/wallets', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            const data = await res.json();
+
+            if (res.ok) {
+                closeEditModal();
+                loadWallets();
+            } else {
+                errorDiv.textContent = data.error || 'Failed to update wallet';
+                errorDiv.classList.remove('hidden');
+            }
+        } catch (err) {
+            errorDiv.textContent = 'Network error';
+            errorDiv.classList.remove('hidden');
+        }
+    });
+
+    // --- Secret Key Modal Logic ---
+    const secretModal = document.getElementById('secret-modal');
+    const btnCloseSecretModal = document.getElementById('btn-close-secret-modal');
+    const btnCopySecret = document.getElementById('btn-copy-secret');
+
+    function closeSecretModal() {
+        secretModal.classList.remove('active');
+        document.getElementById('secret-error').classList.add('hidden');
+    }
+
+    btnCloseSecretModal.addEventListener('click', closeSecretModal);
+    secretModal.addEventListener('click', (e) => {
+        if (e.target === secretModal) closeSecretModal();
+    });
+
+    btnCopySecret.addEventListener('click', () => {
+        const secretText = document.getElementById('secret-key-value').textContent;
+        if (secretText) {
+            navigator.clipboard.writeText(secretText).catch(() => {});
+        }
+    });
+
     // Make wallet cards clickable to open explorer
     walletsContainer.addEventListener('click', async (e) => {
         const deleteBtn = e.target.closest('.btn-delete-wallet');
@@ -356,6 +496,64 @@ function initDashboard() {
                     alert('Network error');
                 }
             }
+            return;
+        }
+
+        const editBtn = e.target.closest('.btn-edit-wallet');
+        if (editBtn) {
+            e.stopPropagation();
+            const card = editBtn.closest('.wallet-card');
+            pending2faAction = async () => {
+                document.getElementById('edit-wallet-id').value = card.dataset.id;
+                document.getElementById('edit-wallet-name').value = card.dataset.name;
+                document.getElementById('edit-api-key').value = card.dataset.apiKey;
+                document.getElementById('edit-secret-key').value = '';
+                editSecretKeyInput.type = 'password';
+                toggleSecretIcon.innerHTML = '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>';
+                editWalletModal.classList.add('active');
+                // Fetch current secret key and fill it in (masked)
+                try {
+                    const res = await fetch(`/api/wallets/secret?id=${card.dataset.id}`);
+                    const data = await res.json();
+                    if (res.ok) {
+                        document.getElementById('edit-secret-key').value = data.secret_key;
+                    }
+                } catch (err) {}
+            };
+            tfaVerifyModal.classList.add('active');
+            document.getElementById('tfa-verify-code').focus();
+            return;
+        }
+
+        const showSecretBtn = e.target.closest('.btn-show-secret');
+        if (showSecretBtn) {
+            e.stopPropagation();
+            const card = showSecretBtn.closest('.wallet-card');
+            pending2faAction = async () => {
+                document.getElementById('secret-wallet-name').textContent = card.dataset.name;
+                document.getElementById('secret-api-key').textContent = card.dataset.apiKey;
+                document.getElementById('secret-key-value').textContent = 'Loading...';
+                document.getElementById('secret-error').classList.add('hidden');
+                secretModal.classList.add('active');
+                try {
+                    const res = await fetch(`/api/wallets/secret?id=${card.dataset.id}`);
+                    const data = await res.json();
+                    if (res.ok) {
+                        document.getElementById('secret-api-key').textContent = data.api_key;
+                        document.getElementById('secret-key-value').textContent = data.secret_key;
+                    } else {
+                        document.getElementById('secret-error').textContent = data.error || 'Failed to load secret';
+                        document.getElementById('secret-error').classList.remove('hidden');
+                        document.getElementById('secret-key-value').textContent = '';
+                    }
+                } catch (err) {
+                    document.getElementById('secret-error').textContent = 'Network error';
+                    document.getElementById('secret-error').classList.remove('hidden');
+                    document.getElementById('secret-key-value').textContent = '';
+                }
+            };
+            tfaVerifyModal.classList.add('active');
+            document.getElementById('tfa-verify-code').focus();
             return;
         }
 
