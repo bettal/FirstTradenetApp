@@ -106,12 +106,46 @@ import ssl
 
 PORT = int(os.environ.get('PORT', 8000))
 
+# Load .env file if present (for standalone start without start.sh)
+_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+if os.path.exists(_env_path):
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith('#') and '=' in _line:
+                _k, _v = _line.split('=', 1)
+                if _k.strip() not in os.environ:
+                    os.environ[_k.strip()] = _v.strip()
+
 # PostgreSQL configuration (use environment variables with defaults)
 DB_HOST = os.environ.get('DB_HOST', 'localhost')
 DB_PORT = int(os.environ.get('DB_PORT', 5432))
 DB_NAME = os.environ.get('DB_NAME', 'tradernet')
 DB_USER = os.environ.get('DB_USER', 'postgres')
 DB_PASSWORD = os.environ.get('DB_PASSWORD', 'postgres')
+
+# Server-level encryption key (for totp_secret, phone HMAC)
+# Generated on first run, stored in env var for persistence across restarts
+SERVER_KEY = os.environ.get('SERVER_ENCRYPTION_KEY')
+if not SERVER_KEY:
+    SERVER_KEY = base64.urlsafe_b64encode(os.urandom(32)).decode('utf-8')
+    os.environ['SERVER_ENCRYPTION_KEY'] = SERVER_KEY
+    log.warning("Generated new SERVER_ENCRYPTION_KEY — save this to .env for persistence!")
+
+_server_fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(SERVER_KEY.encode()).digest()))
+phone_hmac_key = SERVER_KEY.encode()
+
+def server_encrypt(value):
+    """Encrypt data with the server-level Fernet key."""
+    return _server_fernet.encrypt(value.encode('utf-8')).decode('utf-8')
+
+def server_decrypt(value):
+    """Decrypt data with the server-level Fernet key."""
+    return _server_fernet.decrypt(value.encode('utf-8')).decode('utf-8')
+
+def phone_hash(phone: str) -> str:
+    """Compute HMAC-SHA256 hash of phone for lookup."""
+    return hmac.new(phone_hmac_key, phone.encode('utf-8'), hashlib.sha256).hexdigest()
 
 # Connection pool (min 2, max 20 connections)
 db_pool = None
@@ -191,6 +225,37 @@ def init_db():
             EXCEPTION WHEN duplicate_column THEN NULL;
             END $$;
         """)
+    # ── Encrypted columns migration ──
+    for col_name, col_def in [
+        ('phone_hash', 'TEXT UNIQUE'),
+        ('totp_secret_encrypted', 'TEXT'),
+    ]:
+        c.execute(f"""
+            DO $$ BEGIN
+                ALTER TABLE users ADD COLUMN {col_name} {col_def};
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$;
+        """)
+    conn.commit()
+    # Migrate existing plaintext phone → phone_hash
+    c.execute("SELECT id, phone FROM users WHERE phone_hash IS NULL AND phone IS NOT NULL")
+    for uid, ph in c.fetchall():
+        c.execute("UPDATE users SET phone_hash = %s WHERE id = %s", (phone_hash(ph), uid))
+    conn.commit()
+    # Migrate existing plaintext totp_secret → encrypted
+    c.execute("SELECT id, totp_secret FROM users WHERE totp_secret_encrypted IS NULL AND totp_secret IS NOT NULL AND totp_secret != ''")
+    for uid, ts in c.fetchall():
+        try:
+            c.execute("UPDATE users SET totp_secret_encrypted = %s WHERE id = %s", (server_encrypt(ts), uid))
+        except Exception as e:
+            log.error(f"Failed to encrypt totp_secret for user {uid}: {e}")
+    conn.commit()
+    # Clear plaintext totp_secret
+    c.execute("UPDATE users SET totp_secret = NULL WHERE totp_secret_encrypted IS NOT NULL")
+    # Clear old plaintext session_tokens (now using SHA256 hashes)
+    c.execute("UPDATE users SET session_token = NULL WHERE session_token IS NOT NULL AND length(session_token) < 64")
+    conn.commit()
+
     c.execute('''
         CREATE TABLE IF NOT EXISTS api_dictionaries (
             id SERIAL PRIMARY KEY,
@@ -573,12 +638,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             enc_key = user.get('encryption_key')
             for row in c.fetchall():
                 login_val = ''
+                api_key_val = row[2] or ''
+                api_key_was_plaintext = False
                 if enc_key and row[3]:
                     try:
                         login_val = Fernet(enc_key).decrypt(row[3].encode('utf-8')).decode('utf-8')
                     except Exception:
-                        login_val = row[3]  # fallback for unencrypted data
-                wallets.append({'id': row[0], 'name': row[1], 'api_key': row[2], 'login': login_val})
+                        login_val = row[3]
+                if enc_key and api_key_val:
+                    try:
+                        api_key_val = Fernet(enc_key).decrypt(api_key_val.encode('utf-8')).decode('utf-8')
+                    except Exception:
+                        # Plaintext — encrypt now (lazy migration)
+                        api_key_was_plaintext = True
+                wallets.append({'id': row[0], 'name': row[1], 'api_key': api_key_val, 'login': login_val})
+                # Auto-encrypt plaintext api_key
+                if api_key_was_plaintext and enc_key:
+                    try:
+                        enc_api = Fernet(enc_key).encrypt(api_key_val.encode('utf-8')).decode('utf-8')
+                        c2 = conn.cursor()
+                        c2.execute('UPDATE wallets SET api_key = %s WHERE id = %s', (enc_api, row[0]))
+                        conn.commit()
+                    except Exception:
+                        pass
             close_db(conn)
             self.send_json({'wallets': wallets, 'totp_enabled': user['totp_enabled'] == 1})
             return
@@ -658,8 +740,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
             try:
                 f = Fernet(user['encryption_key'])
+                decoded_api_key = wallet[1]
+                try:
+                    decoded_api_key = f.decrypt(wallet[1].encode('utf-8')).decode('utf-8')
+                except Exception:
+                    pass  # fallback for old plaintext data
                 decrypted = f.decrypt(wallet[2].encode('utf-8')).decode('utf-8')
-                self.send_json({'name': wallet[0], 'api_key': wallet[1], 'secret_key': decrypted})
+                self.send_json({'name': wallet[0], 'api_key': decoded_api_key, 'secret_key': decrypted})
             except Exception:
                 self.send_json({'error': 'Decryption failed'}, 500)
             return
@@ -694,14 +781,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
                 conn = get_db()
                 c = conn.cursor()
-                c.execute('SELECT id FROM users WHERE phone = %s', (phone,))
+                c.execute('SELECT id FROM users WHERE phone_hash = %s', (phone_hash(phone),))
                 if c.fetchone():
                     close_db(conn)
                     self.send_json({'error': 'Phone number already registered'}, 400)
                     return
                 
                 salt = os.urandom(16).hex()
-                c.execute('INSERT INTO users (phone, password_hash, salt) VALUES (%s, %s, %s)', (phone, hash_password(password), salt))
+                c.execute('INSERT INTO users (phone, phone_hash, password_hash, salt) VALUES (%s, %s, %s, %s)', (phone, phone_hash(phone), hash_password(password), salt))
                 conn.commit()
                 close_db(conn)
                 self.send_json({'success': True, 'message': 'Account created'})
@@ -723,7 +810,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
             conn = get_db()
             c = conn.cursor()
-            c.execute('SELECT id, password_hash, totp_enabled, salt FROM users WHERE phone = %s', (phone,))
+            c.execute('SELECT id, password_hash, totp_enabled, salt FROM users WHERE phone_hash = %s', (phone_hash(phone),))
             user = c.fetchone()
             close_db(conn)
             
@@ -755,11 +842,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             
             conn = get_db()
             c = conn.cursor()
-            c.execute('SELECT id, totp_secret, totp_enabled, password_hash, salt FROM users WHERE phone = %s', (phone,))
+            c.execute('SELECT id, totp_secret_encrypted, totp_enabled, password_hash, salt FROM users WHERE phone_hash = %s', (phone_hash(phone),))
             user = c.fetchone()
             close_db(conn)
             
-            if user and user[2] == 1 and check_password(password, user[3]) and user[1] and verify_totp(user[1], code):
+            if user and user[2] == 1 and check_password(password, user[3]) and user[1] and verify_totp(server_decrypt(user[1]), code):
                 self._login_user(phone, password, user[4])
             else:
                 self._record_failed_attempt(phone)
@@ -778,11 +865,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
             conn = get_db()
             c = conn.cursor()
-            c.execute('SELECT totp_secret FROM users WHERE id = %s', (user['id'],))
+            c.execute('SELECT totp_secret_encrypted FROM users WHERE id = %s', (user['id'],))
             row = c.fetchone()
             close_db(conn)
 
-            if row and row[0] and verify_totp(row[0], code):
+            if row and row[0] and verify_totp(server_decrypt(row[0]), code):
                 token = SimpleCookie(self.headers.get('Cookie', '')).get('session_token').value if 'Cookie' in self.headers else None
                 if token and token in IN_MEMORY_SESSIONS:
                     IN_MEMORY_SESSIONS[token]['2fa_verified_at'] = time.time()
@@ -798,7 +885,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 
             conn = get_db()
             c = conn.cursor()
-            c.execute('SELECT totp_secret, totp_enabled, phone FROM users WHERE id = %s', (user['id'],))
+            c.execute('SELECT totp_secret_encrypted, totp_enabled, phone FROM users WHERE id = %s', (user['id'],))
             row = c.fetchone()
             
             if row[1] == 1:
@@ -806,10 +893,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({'error': '2FA is already enabled'}, 400)
                 return
                 
-            totp_secret = row[0]
-            if not totp_secret:
+            totp_secret = None
+            if row[0]:
+                try:
+                    totp_secret = server_decrypt(row[0])
+                except Exception:
+                    totp_secret = generate_totp_secret()
+                    c.execute('UPDATE users SET totp_secret_encrypted = %s WHERE id = %s', (server_encrypt(totp_secret), user['id']))
+                    conn.commit()
+            else:
                 totp_secret = generate_totp_secret()
-                c.execute('UPDATE users SET totp_secret = %s WHERE id = %s', (totp_secret, user['id']))
+                c.execute('UPDATE users SET totp_secret_encrypted = %s WHERE id = %s', (server_encrypt(totp_secret), user['id']))
                 conn.commit()
                 
             close_db(conn)
@@ -830,10 +924,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             
             conn = get_db()
             c = conn.cursor()
-            c.execute('SELECT totp_secret FROM users WHERE id = %s', (user['id'],))
+            c.execute('SELECT totp_secret_encrypted FROM users WHERE id = %s', (user['id'],))
             row = c.fetchone()
             
-            if row and row[0] and verify_totp(row[0], code):
+            if row and row[0] and verify_totp(server_decrypt(row[0]), code):
                 c.execute('UPDATE users SET totp_enabled = 1 WHERE id = %s', (user['id'],))
                 conn.commit()
                 close_db(conn)
@@ -890,6 +984,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             
             if api_key and secret_key:
                 f = Fernet(user['encryption_key'])
+                encrypted_api_key = f.encrypt(api_key.encode('utf-8')).decode('utf-8')
                 encrypted_secret = f.encrypt(secret_key.encode('utf-8')).decode('utf-8')
                 encrypted_login = f.encrypt(login.encode('utf-8')).decode('utf-8') if login else ''
                 encrypted_password = f.encrypt(password.encode('utf-8')).decode('utf-8') if password else ''
@@ -897,7 +992,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 conn = get_db()
                 c = conn.cursor()
                 c.execute('INSERT INTO wallets (user_id, name, api_key, secret_key, login, password) VALUES (%s, %s, %s, %s, %s, %s)', 
-                          (user['id'], name, api_key, encrypted_secret, encrypted_login, encrypted_password))
+                          (user['id'], name, encrypted_api_key, encrypted_secret, encrypted_login, encrypted_password))
                 conn.commit()
                 close_db(conn)
                 self.send_json({'success': True})
@@ -1249,15 +1344,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         """Increment failed_attempts and lock if threshold exceeded."""
         conn = get_db()
         c = conn.cursor()
-        c.execute('SELECT failed_attempts FROM users WHERE phone = %s FOR UPDATE', (phone,))
+        c.execute('SELECT failed_attempts FROM users WHERE phone_hash = %s FOR UPDATE', (phone_hash(phone),))
         row = c.fetchone()
         if row:
             attempts = (row[0] or 0) + 1
             if attempts >= BRUTE_FORCE_MAX_ATTEMPTS:
-                c.execute("UPDATE users SET failed_attempts = %s, locked_until = NOW() + interval '%s minutes' WHERE phone = %s",
+                c.execute("UPDATE users SET failed_attempts = %s, locked_until = NOW() + interval '%s minutes' WHERE phone_hash = %s",
                           (attempts, BRUTE_FORCE_LOCKOUT_MINUTES, phone))
             else:
-                c.execute('UPDATE users SET failed_attempts = %s WHERE phone = %s', (attempts, phone))
+                c.execute('UPDATE users SET failed_attempts = %s WHERE phone_hash = %s', (attempts, phone_hash(phone)))
             conn.commit()
             time.sleep(min(attempts * 0.5, 3))
         close_db(conn)
@@ -1266,7 +1361,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         """Check if account is locked. Returns (ok, lock_seconds_remaining)."""
         conn = get_db()
         c = conn.cursor()
-        c.execute('SELECT locked_until FROM users WHERE phone = %s', (phone,))
+        c.execute('SELECT locked_until FROM users WHERE phone_hash = %s', (phone_hash(phone),))
         row = c.fetchone()
         close_db(conn)
         if row and row[0]:
@@ -1332,8 +1427,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 updates.append('name = %s')
                 values.append(name)
             if api_key is not None:
+                f = Fernet(user['encryption_key'])
                 updates.append('api_key = %s')
-                values.append(api_key)
+                values.append(f.encrypt(api_key.encode('utf-8')).decode('utf-8') if api_key else '')
             if secret_key is not None:
                 f = Fernet(user['encryption_key'])
                 encrypted = f.encrypt(secret_key.encode('utf-8')).decode('utf-8')
@@ -1391,6 +1487,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         csrf_token = base64.urlsafe_b64encode(os.urandom(CSRF_TOKEN_BYTES)).decode('utf-8')
         session_token = str(uuid.uuid4())
+        session_hash = hashlib.sha256(session_token.encode()).hexdigest()
         IN_MEMORY_SESSIONS[session_token] = {
             'encryption_key': encryption_key,
             '2fa_verified_at': None,
@@ -1400,7 +1497,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         conn = get_db()
         c = conn.cursor()
-        c.execute('UPDATE users SET session_token = %s, failed_attempts = 0, locked_until = NULL WHERE phone = %s', (session_token, phone))
+        c.execute('UPDATE users SET session_token = %s, failed_attempts = 0, locked_until = NULL WHERE phone_hash = %s', (session_hash, phone_hash(phone)))
         conn.commit()
         close_db(conn)
 
@@ -1422,9 +1519,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             cookie = SimpleCookie(self.headers.get('Cookie'))
             if 'session_token' in cookie:
                 token = cookie['session_token'].value
+                token_hash = hashlib.sha256(token.encode()).hexdigest()
                 conn = get_db()
                 c = conn.cursor()
-                c.execute('SELECT id, phone, totp_enabled, failed_attempts, locked_until FROM users WHERE session_token = %s', (token,))
+                c.execute('SELECT id, phone, totp_enabled, failed_attempts, locked_until FROM users WHERE session_token = %s', (token_hash,))
                 user = c.fetchone()
                 close_db(conn)
                 if user:

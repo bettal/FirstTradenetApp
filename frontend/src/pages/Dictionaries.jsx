@@ -11,10 +11,11 @@ export default function Dictionaries() {
   const [selectedWallet, setSelectedWallet] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [expandedCode, setExpandedCode] = useState(null);
-  const [entries, setEntries] = useState({});
-  const [entriesLoading, setEntriesLoading] = useState({});
+  const [selectedDict, setSelectedDict] = useState(null);
+  const [entries, setEntries] = useState([]);
+  const [entriesLoading, setEntriesLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [search, setSearch] = useState('');
 
   const { addToast } = useApp();
 
@@ -28,7 +29,6 @@ export default function Dictionaries() {
       setDictionaries(Array.isArray(dicts) ? dicts : []);
       setWallets(Array.isArray(walletData.wallets) ? walletData.wallets : []);
     } catch (err) {
-      console.error('Dictionaries load error:', err);
       setError('Failed to load: ' + (err.message || ''));
     } finally {
       setLoading(false);
@@ -43,42 +43,37 @@ export default function Dictionaries() {
     }
   }, [wallets, selectedWallet]);
 
-  const toggleExpand = useCallback(async (code) => {
-    if (expandedCode === code) {
-      setExpandedCode(null);
-      return;
+  const loadEntries = useCallback(async (code) => {
+    setEntriesLoading(true);
+    setSearch('');
+    try {
+      const data = await getDictionaryEntries(code);
+      setEntries(Array.isArray(data.entries) ? data.entries : []);
+    } catch {
+      setEntries([]);
+    } finally {
+      setEntriesLoading(false);
     }
-    setExpandedCode(code);
-    if (!entries[code]) {
-      setEntriesLoading(prev => ({ ...prev, [code]: true }));
-      try {
-        const data = await getDictionaryEntries(code);
-        setEntries(prev => ({ ...prev, [code]: Array.isArray(data.entries) ? data.entries : [] }));
-      } catch {
-        setEntries(prev => ({ ...prev, [code]: [] }));
-      } finally {
-        setEntriesLoading(prev => ({ ...prev, [code]: false }));
-      }
-    }
-  }, [expandedCode, entries]);
+  }, []);
 
-  const handleRefresh = async (code) => {
-    if (!selectedWallet) {
+  const handleSelectDict = (dict) => {
+    setSelectedDict(dict);
+    loadEntries(dict.code);
+  };
+
+  const handleRefresh = async () => {
+    if (!selectedWallet || !selectedDict) {
       addToast('Select a wallet first', 'warning');
       return;
     }
     try {
-      const res = await refreshDictionary(code, selectedWallet);
+      const res = await refreshDictionary(selectedDict.code, selectedWallet);
       if (res.error) {
         addToast(res.error, 'error');
         return;
       }
       addToast('Entries refreshed', 'success');
-      setEntries(prev => ({ ...prev, [code]: null }));
-      setEntriesLoading(prev => ({ ...prev, [code]: true }));
-      const data = await getDictionaryEntries(code);
-      setEntries(prev => ({ ...prev, [code]: Array.isArray(data.entries) ? data.entries : [] }));
-      setEntriesLoading(prev => ({ ...prev, [code]: false }));
+      loadEntries(selectedDict.code);
     } catch {
       addToast('Network error', 'error');
     }
@@ -94,14 +89,29 @@ export default function Dictionaries() {
     for (const d of dictionaries) {
       try { await refreshDictionary(d.code, selectedWallet); } catch {}
     }
-    setEntries({});
-    setExpandedCode(null);
     addToast('All dictionaries refreshed', 'success');
     try {
       const updated = await getDictionaries();
       setDictionaries(Array.isArray(updated) ? updated : []);
     } catch {}
     setRefreshing(false);
+    if (selectedDict) loadEntries(selectedDict.code);
+  };
+
+  const filteredEntries = search
+    ? entries.filter(e =>
+        (e.code || '').toLowerCase().includes(search.toLowerCase()) ||
+        (e.name || '').toLowerCase().includes(search.toLowerCase()) ||
+        JSON.stringify(e.data || {}).toLowerCase().includes(search.toLowerCase())
+      )
+    : entries;
+
+  const formatData = (data) => {
+    if (!data || (typeof data === 'object' && Object.keys(data).length === 0)) return '—';
+    try {
+      const s = JSON.stringify(data, null, 2);
+      return s.length > 200 ? s.substring(0, 200) + '…' : s;
+    } catch { return String(data); }
   };
 
   if (loading) {
@@ -122,6 +132,7 @@ export default function Dictionaries() {
 
       {error && <div className="form-error mb-2">{error}</div>}
 
+      {/* Toolbar */}
       <div className="flex items-center gap-2 mb-3" style={{ flexWrap: 'wrap' }}>
         <select className="glass-select" style={{ width: 'auto', minWidth: 200 }} value={selectedWallet} onChange={e => setSelectedWallet(e.target.value)}>
           <option value="">-- Select Wallet --</option>
@@ -134,74 +145,173 @@ export default function Dictionaries() {
         </GlassButton>
       </div>
 
-      {dictionaries.length === 0 ? (
-        <GlassCard style={{ padding: '3rem', textAlign: 'center' }}>
-          <p className="text-dim">No dictionaries found</p>
-        </GlassCard>
-      ) : (
-        <div className="grid-dict">
-          {dictionaries.map(d => {
-            const isExpanded = expandedCode === d.code;
-            const dictEntries = entries[d.code];
-            const isLoadingEntries = entriesLoading[d.code];
-
-            return (
-              <GlassCard key={d.code} interactive onClick={() => toggleExpand(d.code)} style={{ padding: '1.25rem' }}>
-                <div className="flex items-center gap-2 mb-2">
-                  <h3 style={{ fontSize: '1rem', fontWeight: 600, margin: 0, flex: 1 }}>{d.name}</h3>
-                  <span className={`badge ${d.updated_at ? 'badge--success' : 'badge--warning'}`}>
-                    {d.updated_at ? 'cached' : 'empty'}
-                  </span>
-                </div>
-
-                <span className="badge badge--accent" style={{ fontFamily: 'JetBrains Mono, monospace' }}>{d.endpoint}</span>
-
-                {d.description && <p className="text-dim text-xs mt-1">{d.description}</p>}
-
-                <div className="flex gap-3 mt-2 text-xs text-dim">
-                  <span>{d.updated_at ? d.updated_at.replace('T', ' ').substring(0, 19) : 'never fetched'}</span>
-                </div>
-
-                {isExpanded && (
-                  <div
-                    style={{
-                      margin: '1rem -1.25rem -1.25rem',
-                      padding: '1rem 1.25rem',
-                      background: 'rgba(0,0,0,0.25)',
-                      borderTop: '1px solid var(--glass-border)',
-                      borderRadius: '0 0 var(--radius-lg) var(--radius-lg)',
-                      maxHeight: 350,
-                      overflowY: 'auto',
-                    }}
-                    onClick={e => e.stopPropagation()}
-                  >
-                    <div className="flex justify-between items-center mb-2">
-                      <span className="text-xs text-dim">{dictEntries ? dictEntries.length : 0} entries</span>
-                      <GlassButton variant="ghost" size="sm" onClick={() => handleRefresh(d.code)} disabled={!selectedWallet}>Refresh</GlassButton>
-                    </div>
-
-                    {isLoadingEntries ? (
-                      <div className="text-dim text-xs" style={{ padding: '1rem 0' }}>Loading entries...</div>
-                    ) : dictEntries && dictEntries.length > 0 ? (
-                      dictEntries.map(e => (
-                        <div key={e.id} className="flex items-center gap-2" style={{ padding: '0.5rem 0', borderBottom: '1px solid rgba(255,255,255,0.04)', fontSize: '0.75rem' }}>
-                          <span className="font-mono text-accent" style={{ minWidth: 80 }}>{e.code || '—'}</span>
-                          <span style={{ flex: 1 }}>{e.name || '—'}</span>
-                          <span className="text-dim truncate" style={{ maxWidth: 150 }} title={JSON.stringify(e.data)}>
-                            {(JSON.stringify(e.data) || '').substring(0, 40)}
-                          </span>
-                        </div>
-                      ))
-                    ) : (
-                      <div className="text-dim text-xs" style={{ padding: '1rem 0' }}>No entries cached. Click Refresh to fetch.</div>
-                    )}
+      {/* Two-column layout: sidebar + table */}
+      <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'flex-start' }}>
+        {/* Left sidebar: dictionary list */}
+        <div style={{ width: 240, flexShrink: 0 }}>
+          <GlassCard style={{ padding: '0.5rem' }}>
+            <div style={{ padding: '0.5rem 0.75rem', fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              Dictionaries ({dictionaries.length})
+            </div>
+            {dictionaries.map(d => {
+              const isActive = selectedDict?.code === d.code;
+              return (
+                <div
+                  key={d.code}
+                  onClick={() => handleSelectDict(d)}
+                  style={{
+                    padding: '0.65rem 0.75rem',
+                    borderRadius: 'var(--radius-sm)',
+                    cursor: 'pointer',
+                    margin: '0.125rem 0',
+                    background: isActive ? 'rgba(99,102,241,0.12)' : 'transparent',
+                    borderLeft: isActive ? '2px solid var(--accent)' : '2px solid transparent',
+                    transition: 'all 0.15s',
+                  }}
+                  onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'rgba(255,255,255,0.03)'; }}
+                  onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}
+                >
+                  <div style={{ fontSize: '0.8125rem', fontWeight: isActive ? 600 : 400, color: isActive ? 'var(--text-main)' : 'var(--text-muted)' }}>
+                    {d.name}
                   </div>
-                )}
-              </GlassCard>
-            );
-          })}
+                  <div style={{ fontSize: '0.6875rem', color: 'var(--text-dim)', marginTop: '0.125rem', fontFamily: 'JetBrains Mono, monospace' }}>
+                    {d.endpoint}
+                  </div>
+                </div>
+              );
+            })}
+          </GlassCard>
         </div>
-      )}
+
+        {/* Right content: table */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {!selectedDict ? (
+            <GlassCard style={{ padding: '3rem', textAlign: 'center' }}>
+              <p className="text-dim">Select a dictionary from the list</p>
+            </GlassCard>
+          ) : (
+            <GlassCard style={{ overflow: 'hidden' }}>
+              {/* Table header */}
+              <div className="flex items-center justify-between" style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--glass-border)' }}>
+                <div>
+                  <h3 style={{ fontSize: '1rem', fontWeight: 600, margin: 0 }}>{selectedDict.name}</h3>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', marginTop: '0.25rem' }}>
+                    <span className="badge badge--accent" style={{ fontFamily: 'JetBrains Mono, monospace' }}>{selectedDict.endpoint}</span>
+                    {selectedDict.description && <span style={{ marginLeft: '0.5rem' }}>{selectedDict.description}</span>}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-dim">{entries.length} entries</span>
+                  <GlassButton variant="ghost" size="sm" onClick={handleRefresh} disabled={!selectedWallet}>
+                    Refresh
+                  </GlassButton>
+                </div>
+              </div>
+
+              {/* Search */}
+              <div style={{ padding: '0.75rem 1.25rem', borderBottom: '1px solid var(--glass-border)' }}>
+                <input
+                  type="text"
+                  className="glass-input"
+                  placeholder="Search entries by code, name or data..."
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  style={{ fontSize: '0.8125rem', padding: '0.5rem 0.75rem' }}
+                />
+              </div>
+
+              {/* Table body */}
+              <div style={{ maxHeight: 'calc(100vh - 320px)', minHeight: 300, overflowY: 'auto' }}>
+                {entriesLoading ? (
+                  <div className="text-dim text-sm" style={{ padding: '2rem', textAlign: 'center' }}>Loading entries...</div>
+                ) : filteredEntries.length === 0 ? (
+                  <div className="text-dim text-sm" style={{ padding: '2rem', textAlign: 'center' }}>
+                    {search ? 'No matching entries' : 'No entries cached. Click Refresh to fetch from API.'}
+                  </div>
+                ) : (
+                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid var(--glass-border)' }}>
+                        <th style={thStyle}>Code</th>
+                        <th style={thStyle}>Name</th>
+                        <th style={thStyle}>Data</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredEntries.map((e, i) => {
+                        const dataStr = formatData(e.data);
+                        const isLast = i === filteredEntries.length - 1;
+                        return (
+                          <tr
+                            key={e.id}
+                            style={{
+                              borderBottom: isLast ? 'none' : '1px solid rgba(255,255,255,0.04)',
+                            }}
+                            onMouseEnter={e => e.currentTarget.style.background = 'rgba(99,102,241,0.04)'}
+                            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                          >
+                            <td style={tdCodeStyle}>
+                              <span style={{ fontFamily: 'JetBrains Mono, monospace', color: 'var(--accent-light)' }}>
+                                {e.code || '—'}
+                              </span>
+                            </td>
+                            <td style={tdNameStyle}>{e.name || '—'}</td>
+                            <td style={tdDataStyle}>
+                              <span
+                                title={JSON.stringify(e.data || {})}
+                                style={{
+                                  fontFamily: 'JetBrains Mono, monospace',
+                                  fontSize: '0.75rem',
+                                  color: 'var(--text-muted)',
+                                  whiteSpace: 'pre-wrap',
+                                  wordBreak: 'break-word',
+                                }}
+                              >
+                                {dataStr}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </GlassCard>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
+
+const thStyle = {
+  padding: '0.625rem 1rem',
+  textAlign: 'left',
+  fontSize: '0.6875rem',
+  fontWeight: 600,
+  color: 'var(--text-dim)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.05em',
+  borderBottom: '1px solid var(--glass-border)',
+};
+
+const tdCodeStyle = {
+  padding: '0.5rem 1rem',
+  fontSize: '0.8125rem',
+  verticalAlign: 'top',
+  minWidth: 100,
+};
+
+const tdNameStyle = {
+  padding: '0.5rem 1rem',
+  fontSize: '0.8125rem',
+  verticalAlign: 'top',
+  minWidth: 140,
+};
+
+const tdDataStyle = {
+  padding: '0.5rem 1rem',
+  fontSize: '0.8125rem',
+  verticalAlign: 'top',
+};
