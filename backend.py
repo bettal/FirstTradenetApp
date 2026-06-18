@@ -118,6 +118,55 @@ def init_db():
             FOREIGN KEY(user_id) REFERENCES users(id)
         )
     ''')
+    # Add login/password columns if missing
+    for col_name, col_def in [
+        ('login', 'TEXT'),
+        ('password', 'TEXT'),
+    ]:
+        c.execute(f"""
+            DO $$ BEGIN
+                ALTER TABLE wallets ADD COLUMN {col_name} {col_def};
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$;
+        """)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS api_dictionaries (
+            id SERIAL PRIMARY KEY,
+            code TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            endpoint TEXT NOT NULL,
+            category TEXT DEFAULT 'various',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS api_dictionary_entries (
+            id SERIAL PRIMARY KEY,
+            dictionary_id INTEGER NOT NULL,
+            entry_code TEXT,
+            entry_name TEXT,
+            entry_data JSONB DEFAULT '{}'::jsonb,
+            FOREIGN KEY(dictionary_id) REFERENCES api_dictionaries(id) ON DELETE CASCADE
+        )
+    ''')
+    # Seed dictionaries
+    dicts = [
+        ("reception_types", "Office Types", "List of existing offices/reception types", "getReceptionTypes"),
+        ("mkt", "Trading Platforms", "Trading platforms / markets", "getMkt"),
+        ("instruments", "Instruments", "Instruments details and specifications", "getInstruments"),
+        ("cps_types_list", "Request Types", "Types of client requests (CPS)", "getCPSTypesList"),
+        ("passport_type", "Document Types", "Types of identity documents", "getPassportType"),
+        ("order_statuses", "Order Statuses", "Possible order status values", "getOrderStatuses"),
+        ("safety", "Signature Types", "Types of electronic signatures", "getSafetyTypes"),
+        ("type_codes", "Valid Codes", "Types of valid/trade codes", "getTypeCodes"),
+    ]
+    for code, name, desc, endpoint in dicts:
+        c.execute("""
+            INSERT INTO api_dictionaries (code, name, description, endpoint)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name, description=EXCLUDED.description, endpoint=EXCLUDED.endpoint
+        """, (code, name, desc, endpoint))
     conn.commit()
     conn.close()
 
@@ -177,17 +226,107 @@ class TradeManager:
             raise Exception("Third-party API not available")
 
 COMMANDS_REGISTRY = [
-    # --- Market Data ---
-    {"name": "getSecurityInfo", "display_name": "Ticker Info", "category": "market_data", "category_display": "Market Data", "library": "raw_v2", "cmd": "getSecurityInfo", "params": [
+    # === User Data ===
+    {"name": "getOPQ", "display_name": "Initial User Data (OPQ)", "category": "user_data", "category_display": "User Data", "library": "raw_v2", "cmd": "getOPQ", "params": []},
+    {"name": "getSIDInfo", "display_name": "Session Information", "category": "user_data", "category_display": "User Data", "library": "raw_v2", "cmd": "getSIDInfo", "params": []},
+
+    # === Security Session ===
+    {"name": "getSecuritySessions", "display_name": "Security Sessions List", "category": "security_session", "category_display": "Security Session", "library": "raw_v2", "cmd": "getSecuritySessions", "params": []},
+    {"name": "openSecuritySession", "display_name": "Open Security Session", "category": "security_session", "category_display": "Security Session", "library": "raw_v2", "cmd": "openSecuritySession", "params": [
+        {"name": "session_type", "type": "string", "required": True, "description": "Session type code"}
+    ]},
+
+    # === Set up the list of securities ===
+    {"name": "getSecuritiesLists", "display_name": "Get Securities Lists", "category": "securities_lists", "category_display": "Securities Lists", "library": "raw_v2", "cmd": "getSecuritiesLists", "params": []},
+    {"name": "addSecuritiesList", "display_name": "Add Securities List", "category": "securities_lists", "category_display": "Securities Lists", "library": "raw_v2", "cmd": "addSecuritiesList", "params": [
+        {"name": "name", "type": "string", "required": True, "description": "List name"}
+    ]},
+    {"name": "updateSecuritiesList", "display_name": "Update Securities List", "category": "securities_lists", "category_display": "Securities Lists", "library": "raw_v2", "cmd": "updateSecuritiesList", "params": [
+        {"name": "list_id", "type": "int", "required": True, "description": "List ID"},
+        {"name": "name", "type": "string", "required": False, "description": "New name"}
+    ]},
+    {"name": "deleteSecuritiesList", "display_name": "Delete Securities List", "category": "securities_lists", "category_display": "Securities Lists", "library": "raw_v2", "cmd": "deleteSecuritiesList", "params": [
+        {"name": "list_id", "type": "int", "required": True, "description": "List ID"}
+    ]},
+    {"name": "makeListSelected", "display_name": "Select Securities List", "category": "securities_lists", "category_display": "Securities Lists", "library": "raw_v2", "cmd": "makeListSelected", "params": [
+        {"name": "list_id", "type": "int", "required": True, "description": "List ID"}
+    ]},
+    {"name": "addListTicker", "display_name": "Add Ticker to List", "category": "securities_lists", "category_display": "Securities Lists", "library": "raw_v2", "cmd": "addListTicker", "params": [
+        {"name": "list_id", "type": "int", "required": True, "description": "List ID"},
+        {"name": "ticker", "type": "string", "required": True, "description": "Ticker symbol"}
+    ]},
+    {"name": "deleteListTicker", "display_name": "Delete Ticker from List", "category": "securities_lists", "category_display": "Securities Lists", "library": "raw_v2", "cmd": "deleteListTicker", "params": [
+        {"name": "list_id", "type": "int", "required": True, "description": "List ID"},
+        {"name": "ticker", "type": "string", "required": True, "description": "Ticker symbol"}
+    ]},
+
+    # === Quotes and Tickers ===
+    {"name": "getMarketStatus", "display_name": "Market Status", "category": "quotes_tickers", "category_display": "Quotes & Tickers", "library": "raw_v2", "cmd": "getMarketStatus", "params": [
+        {"name": "market", "type": "string", "required": False, "default": "*", "description": "Market code"}
+    ]},
+    {"name": "getSecurityInfo", "display_name": "Ticker Info", "category": "quotes_tickers", "category_display": "Quotes & Tickers", "library": "raw_v2", "cmd": "getSecurityInfo", "params": [
         {"name": "symbol", "type": "string", "required": True, "description": "Ticker symbol (e.g. AAPL.US)"},
         {"name": "sup", "type": "bool", "required": False, "default": True, "description": "Extended info format"}
     ]},
-    {"name": "getMarketStatus", "display_name": "Market Status", "category": "market_data", "category_display": "Market Data", "library": "raw_v2", "cmd": "getMarketStatus", "params": [
-        {"name": "market", "type": "string", "required": False, "default": "*", "description": "Market code"}
+    {"name": "getOptionsByMkt", "display_name": "Options by Market", "category": "quotes_tickers", "category_display": "Quotes & Tickers", "library": "raw_v2", "cmd": "getOptionsByMkt", "params": [
+        {"name": "market", "type": "string", "required": True, "description": "Market code"},
+        {"name": "ticker", "type": "string", "required": True, "description": "Base ticker"}
     ]},
-    # --- User Data ---
-    {"name": "getOPQ", "display_name": "User Info (OPQ)", "category": "portfolio", "category_display": "Portfolio", "library": "raw_v2", "cmd": "getOPQ", "params": []},
-    # --- Orders ---
+    {"name": "getTopSecurities", "display_name": "Most Traded Securities", "category": "quotes_tickers", "category_display": "Quotes & Tickers", "library": "raw_v2", "cmd": "getTopSecurities", "params": [
+        {"name": "market", "type": "string", "required": True, "description": "Market code"},
+        {"name": "limit", "type": "int", "required": False, "default": 10, "description": "Max count"}
+    ]},
+    {"name": "quotesGet", "display_name": "Get Quote", "category": "quotes_tickers", "category_display": "Quotes & Tickers", "library": "raw_v2", "cmd": "quotesGet", "params": [
+        {"name": "ticker", "type": "string", "required": True, "description": "Ticker symbol"}
+    ]},
+    {"name": "getOrderBook", "display_name": "Order Book (Depth)", "category": "quotes_tickers", "category_display": "Quotes & Tickers", "library": "raw_v2", "cmd": "getOrderBook", "params": [
+        {"name": "ticker", "type": "string", "required": True, "description": "Ticker symbol"}
+    ]},
+    {"name": "getHLOC", "display_name": "Historical Candles", "category": "quotes_tickers", "category_display": "Quotes & Tickers", "library": "raw_v2", "cmd": "getHLOC", "params": [
+        {"name": "ticker", "type": "string", "required": True, "description": "Ticker symbol"},
+        {"name": "period", "type": "string", "required": False, "default": "day", "description": "Period: 1min, 5min, 15min, 30min, hour, day, week, month, year"},
+        {"name": "from", "type": "string", "required": False, "description": "Start date (YYYY-MM-DD)"},
+        {"name": "to", "type": "string", "required": False, "description": "End date (YYYY-MM-DD)"},
+        {"name": "limit", "type": "int", "required": False, "default": 100, "description": "Max candles"}
+    ]},
+    {"name": "getTrades", "display_name": "Get Trades", "category": "quotes_tickers", "category_display": "Quotes & Tickers", "library": "raw_v2", "cmd": "getTrades", "params": [
+        {"name": "ticker", "type": "string", "required": True, "description": "Ticker symbol"},
+        {"name": "limit", "type": "int", "required": False, "default": 20, "description": "Max count"}
+    ]},
+    {"name": "getTradesHistory", "display_name": "Trades History", "category": "quotes_tickers", "category_display": "Quotes & Tickers", "library": "raw_v2", "cmd": "getTradesHistory", "params": [
+        {"name": "ticker", "type": "string", "required": True, "description": "Ticker symbol"},
+        {"name": "from", "type": "string", "required": False, "description": "Start date (YYYY-MM-DD)"},
+        {"name": "to", "type": "string", "required": False, "description": "End date (YYYY-MM-DD)"},
+        {"name": "limit", "type": "int", "required": False, "default": 100, "description": "Max count"}
+    ]},
+    {"name": "securityFinder", "display_name": "Ticker Search", "category": "quotes_tickers", "category_display": "Quotes & Tickers", "library": "raw_v2", "cmd": "securityFinder", "params": [
+        {"name": "query", "type": "string", "required": True, "description": "Search query"},
+        {"name": "limit", "type": "int", "required": False, "default": 20, "description": "Max results"}
+    ]},
+    {"name": "getNews", "display_name": "News on Securities", "category": "quotes_tickers", "category_display": "Quotes & Tickers", "library": "raw_v2", "cmd": "getNews", "params": [
+        {"name": "ticker", "type": "string", "required": False, "description": "Ticker filter (optional)"},
+        {"name": "limit", "type": "int", "required": False, "default": 20, "description": "Max news items"}
+    ]},
+    {"name": "getSecurities", "display_name": "Directory of Securities", "category": "quotes_tickers", "category_display": "Quotes & Tickers", "library": "raw_v2", "cmd": "getSecurities", "params": [
+        {"name": "market", "type": "string", "required": False, "description": "Market code filter"},
+        {"name": "limit", "type": "int", "required": False, "default": 50, "description": "Max results"}
+    ]},
+    {"name": "checkAllowedTicker", "display_name": "Check Allowed Ticker", "category": "quotes_tickers", "category_display": "Quotes & Tickers", "library": "raw_v2", "cmd": "checkAllowedTicker", "params": [
+        {"name": "ticker", "type": "string", "required": True, "description": "Ticker symbol"}
+    ]},
+
+    # === Portfolio ===
+    {"name": "getPortfolio", "display_name": "Portfolio Info", "category": "portfolio", "category_display": "Portfolio", "library": "raw_v2", "cmd": "getPortfolio", "params": []},
+
+    # === Orders ===
+    {"name": "getCurrentOrders", "display_name": "Current Orders", "category": "orders", "category_display": "Orders", "library": "raw_v2", "cmd": "getNotifyOrderJson", "params": [
+        {"name": "active_only", "type": "bool", "required": False, "default": True, "description": "Show only active orders"}
+    ]},
+    {"name": "getOrdersHistory", "display_name": "Orders History", "category": "orders", "category_display": "Orders", "library": "raw_v2", "cmd": "getOrdersHistory", "params": [
+        {"name": "from", "type": "string", "required": False, "description": "Start date (YYYY-MM-DD)"},
+        {"name": "to", "type": "string", "required": False, "description": "End date (YYYY-MM-DD)"},
+        {"name": "limit", "type": "int", "required": False, "default": 50, "description": "Max orders"}
+    ]},
     {"name": "putTradeOrder", "display_name": "Send Order", "category": "orders", "category_display": "Orders", "library": "raw_v2", "cmd": "putTradeOrder", "params": [
         {"name": "instr_name", "type": "string", "required": True, "description": "Ticker symbol"},
         {"name": "side", "type": "string", "required": True, "description": "buy / sell"},
@@ -197,25 +336,85 @@ COMMANDS_REGISTRY = [
         {"name": "stop_price", "type": "float", "required": False, "default": 0, "description": "Stop price"},
         {"name": "expiry", "type": "string", "required": False, "default": "day", "description": "day / ext / gtc"}
     ]},
-    {"name": "getNotifyOrderJson", "display_name": "Get Orders", "category": "orders", "category_display": "Orders", "library": "raw_v2", "cmd": "getNotifyOrderJson", "params": [
-        {"name": "active_only", "type": "bool", "required": False, "default": True, "description": "Show only active orders"}
-    ]},
-    {"name": "delTradeOrder", "display_name": "Delete Order", "category": "orders", "category_display": "Orders", "library": "raw_v2", "cmd": "delTradeOrder", "params": [
-        {"name": "order_id", "type": "string", "required": True, "description": "Order ID to delete"}
-    ]},
     {"name": "putStopLoss", "display_name": "Stop Loss / Take Profit", "category": "orders", "category_display": "Orders", "library": "raw_v2", "cmd": "putStopLoss", "params": [
         {"name": "ticker", "type": "string", "required": True, "description": "Ticker symbol"},
         {"name": "stop_loss", "type": "float", "required": False, "default": 0, "description": "Stop loss price"},
         {"name": "take_profit", "type": "float", "required": False, "default": 0, "description": "Take profit price"}
     ]},
+    {"name": "delTradeOrder", "display_name": "Cancel Order", "category": "orders", "category_display": "Orders", "library": "raw_v2", "cmd": "delTradeOrder", "params": [
+        {"name": "order_id", "type": "string", "required": True, "description": "Order ID to cancel"}
+    ]},
+
+    # === Price Alerts ===
+    {"name": "getAlerts", "display_name": "Get Alerts", "category": "price_alerts", "category_display": "Price Alerts", "library": "raw_v2", "cmd": "getAlerts", "params": []},
+    {"name": "addAlert", "display_name": "Add Alert", "category": "price_alerts", "category_display": "Price Alerts", "library": "raw_v2", "cmd": "addAlert", "params": [
+        {"name": "ticker", "type": "string", "required": True, "description": "Ticker symbol"},
+        {"name": "price", "type": "float", "required": True, "description": "Alert price"},
+        {"name": "condition", "type": "string", "required": True, "description": "above / below"}
+    ]},
+    {"name": "deleteAlert", "display_name": "Delete Alert", "category": "price_alerts", "category_display": "Price Alerts", "library": "raw_v2", "cmd": "deleteAlert", "params": [
+        {"name": "alert_id", "type": "string", "required": True, "description": "Alert ID"}
+    ]},
+
+    # === Requests ===
+    {"name": "getClientCPSHistory", "display_name": "Client Requests History", "category": "requests", "category_display": "Requests", "library": "raw_v2", "cmd": "getClientCPSHistory", "params": [
+        {"name": "from", "type": "string", "required": False, "description": "Start date"},
+        {"name": "to", "type": "string", "required": False, "description": "End date"},
+        {"name": "limit", "type": "int", "required": False, "default": 50, "description": "Max results"}
+    ]},
+    {"name": "getCPSFiles", "display_name": "Request Files", "category": "requests", "category_display": "Requests", "library": "raw_v2", "cmd": "getCPSFiles", "params": [
+        {"name": "request_id", "type": "string", "required": True, "description": "Request ID"}
+    ]},
+
+    # === Broker Report ===
+    {"name": "getBrokerReport", "display_name": "Broker Report", "category": "broker_report", "category_display": "Broker Report", "library": "raw_v2", "cmd": "getBrokerReport", "params": [
+        {"name": "from", "type": "string", "required": False, "description": "Start date"},
+        {"name": "to", "type": "string", "required": False, "description": "End date"}
+    ]},
+    {"name": "getBrokerReportURL", "display_name": "Broker Report Link", "category": "broker_report", "category_display": "Broker Report", "library": "raw_v2", "cmd": "getBrokerReportURL", "params": [
+        {"name": "from", "type": "string", "required": False, "description": "Start date"},
+        {"name": "to", "type": "string", "required": False, "description": "End date"}
+    ]},
+    {"name": "getDepositaryReport", "display_name": "Depository Report", "category": "broker_report", "category_display": "Broker Report", "library": "raw_v2", "cmd": "getDepositaryReport", "params": [
+        {"name": "from", "type": "string", "required": False, "description": "Start date"},
+        {"name": "to", "type": "string", "required": False, "description": "End date"}
+    ]},
+    {"name": "getDepositaryReportURL", "display_name": "Depository Report Link", "category": "broker_report", "category_display": "Broker Report", "library": "raw_v2", "cmd": "getDepositaryReportURL", "params": [
+        {"name": "from", "type": "string", "required": False, "description": "Start date"},
+        {"name": "to", "type": "string", "required": False, "description": "End date"}
+    ]},
+    {"name": "getCashflows", "display_name": "Money Movement", "category": "broker_report", "category_display": "Broker Report", "library": "raw_v2", "cmd": "getCashflows", "params": [
+        {"name": "from", "type": "string", "required": False, "description": "Start date"},
+        {"name": "to", "type": "string", "required": False, "description": "End date"}
+    ]},
+
+    # === Currencies ===
+    {"name": "getCrossRatesForDate", "display_name": "Exchange Rate by Date", "category": "currencies", "category_display": "Currencies", "library": "raw_v2", "cmd": "getCrossRatesForDate", "params": [
+        {"name": "date", "type": "string", "required": True, "description": "Date (YYYY-MM-DD)"}
+    ]},
+    {"name": "getCurrencyList", "display_name": "Currency List", "category": "currencies", "category_display": "Currencies", "library": "raw_v2", "cmd": "getCurrencyList", "params": []},
+
+    # === Various (Dictionaries) ===
+    {"name": "getReceptionTypes", "display_name": "Office Types", "category": "various", "category_display": "Various (Dicts)", "library": "raw_v2", "cmd": "getReceptionTypes", "params": []},
+    {"name": "getMkt", "display_name": "Trading Platforms", "category": "various", "category_display": "Various (Dicts)", "library": "raw_v2", "cmd": "getMkt", "params": []},
+    {"name": "getInstruments", "display_name": "Instruments", "category": "various", "category_display": "Various (Dicts)", "library": "raw_v2", "cmd": "getInstruments", "params": []},
+    {"name": "getCPSTypesList", "display_name": "Request Types", "category": "various", "category_display": "Various (Dicts)", "library": "raw_v2", "cmd": "getCPSTypesList", "params": []},
+    {"name": "getPassportType", "display_name": "Document Types", "category": "various", "category_display": "Various (Dicts)", "library": "raw_v2", "cmd": "getPassportType", "params": []},
+    {"name": "getOrderStatuses", "display_name": "Order Statuses", "category": "various", "category_display": "Various (Dicts)", "library": "raw_v2", "cmd": "getOrderStatuses", "params": []},
+    {"name": "getSafetyTypes", "display_name": "Signature Types", "category": "various", "category_display": "Various (Dicts)", "library": "raw_v2", "cmd": "getSafetyTypes", "params": []},
+    {"name": "getTypeCodes", "display_name": "Valid Codes", "category": "various", "category_display": "Various (Dicts)", "library": "raw_v2", "cmd": "getTypeCodes", "params": []},
+
+    # === Websocket (info only) ===
+    {"name": "wsInfo", "display_name": "WebSocket Info", "category": "websocket", "category_display": "WebSocket", "library": "raw_v2", "cmd": "getWebSocketInfo", "params": []},
+
     # --- Raw API ---
     {"name": "raw_v2_custom", "display_name": "Raw API Command (V2)", "category": "advanced", "category_display": "Advanced", "library": "raw_v2", "cmd": "", "params": [
-        {"name": "cmd", "type": "string", "required": True, "description": "API command name (e.g. getSecurityInfo, getMarketStatus, getOPQ, putTradeOrder, getNotifyOrderJson, delTradeOrder, putStopLoss)"},
+        {"name": "cmd", "type": "string", "required": True, "description": "API command name"},
         {"name": "params", "type": "json", "required": False, "default": "{}", "description": "JSON parameters"}
     ]},
 ]
 
-def _api_auth_request(command, params, public_key, private_key, api_base="https://tradernet.ru"):
+def _api_auth_request(command, params, public_key, private_key, api_base="https://tradernet.am"):
     nonce = int(time.time() * 10000)
 
     def _flatten_params(data, root_name=''):
@@ -271,6 +470,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.path = '/index.html'
         elif self.path == '/dashboard':
             self.path = '/dashboard.html'
+        elif self.path == '/dictionaries':
+            self.path = '/dictionaries.html'
         
         # API Route: Get Wallets
         if self.path == '/api/wallets':
@@ -290,6 +491,35 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # API Route: Get Commands Registry
         if self.path == '/api/commands':
             self.send_json(COMMANDS_REGISTRY)
+            return
+
+        # API Route: List Dictionaries
+        if self.path == '/api/dictionaries':
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('SELECT id, code, name, description, endpoint, category, updated_at FROM api_dictionaries ORDER BY code')
+            rows = c.fetchall()
+            conn.close()
+            dicts = [{'id': r[0], 'code': r[1], 'name': r[2], 'description': r[3], 'endpoint': r[4], 'category': r[5], 'updated_at': str(r[6])} for r in rows]
+            self.send_json(dicts)
+            return
+
+        # API Route: Get Dictionary Entries
+        if self.path.startswith('/api/dictionaries/'):
+            code = self.path.split('/api/dictionaries/', 1)[1].split('?')[0]
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('SELECT id, code, name, description, endpoint, updated_at FROM api_dictionaries WHERE code = %s', (code,))
+            dict_row = c.fetchone()
+            if not dict_row:
+                conn.close()
+                self.send_json({'error': 'Dictionary not found'}, 404)
+                return
+            dict_id = dict_row[0]
+            c.execute('SELECT id, entry_code, entry_name, entry_data FROM api_dictionary_entries WHERE dictionary_id = %s ORDER BY id', (dict_id,))
+            entries = [{'id': r[0], 'code': r[1], 'name': r[2], 'data': r[3]} for r in c.fetchall()]
+            conn.close()
+            self.send_json({'dictionary': {'code': dict_row[1], 'name': dict_row[2], 'description': dict_row[3], 'endpoint': dict_row[4], 'updated_at': str(dict_row[5])}, 'entries': entries, 'count': len(entries)})
             return
 
         # API Route: Get Wallet Secret Key
@@ -706,6 +936,91 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 except:
                     self.send_json({'error': f'API Error: {e.code}'}, e.code)
             except Exception as e:
+                self.send_json({'error': str(e)}, 500)
+
+        elif self.path.startswith('/api/dictionaries/') and self.path.endswith('/refresh'):
+            code = self.path.split('/api/dictionaries/', 1)[1].rsplit('/refresh', 1)[0]
+            user = self.get_user_from_session()
+            if not user:
+                self.send_json({'error': 'Unauthorized'}, 401)
+                return
+
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('SELECT id, endpoint FROM api_dictionaries WHERE code = %s', (code,))
+            dict_row = c.fetchone()
+            if not dict_row:
+                conn.close()
+                self.send_json({'error': 'Dictionary not found'}, 404)
+                return
+
+            dict_id = dict_row[0]
+            endpoint_cmd = dict_row[1]
+
+            wallet_id = data.get('walletId')
+            if not wallet_id:
+                conn.close()
+                self.send_json({'error': 'walletId required'}, 400)
+                return
+
+            c.execute('SELECT api_key, secret_key FROM wallets WHERE id = %s AND user_id = %s', (wallet_id, user['id']))
+            wallet = c.fetchone()
+            if not wallet:
+                conn.close()
+                self.send_json({'error': 'Wallet not found'}, 404)
+                return
+
+            if not user.get('encryption_key'):
+                conn.close()
+                self.send_json({'error': 'Encryption key missing, please re-login'}, 401)
+                return
+
+            try:
+                f = Fernet(user['encryption_key'])
+                private_key = f.decrypt(wallet[1].encode('utf-8')).decode('utf-8')
+                public_key = wallet[0]
+
+                result = _api_auth_request(endpoint_cmd, {}, public_key, private_key)
+
+                c.execute('DELETE FROM api_dictionary_entries WHERE dictionary_id = %s', (dict_id,))
+                entries_added = 0
+                if isinstance(result, list):
+                    for item in result:
+                        if isinstance(item, dict):
+                            entry_code = str(item.get('code', item.get('id', '')))
+                            entry_name = str(item.get('name', item.get('title', '')))
+                            entry_data = json.dumps(item)
+                        else:
+                            entry_code = str(item)
+                            entry_name = str(item)
+                            entry_data = json.dumps({'value': str(item)})
+                        c.execute(
+                            'INSERT INTO api_dictionary_entries (dictionary_id, entry_code, entry_name, entry_data) VALUES (%s, %s, %s, %s)',
+                            (dict_id, entry_code, entry_name, entry_data)
+                        )
+                        entries_added += 1
+                elif isinstance(result, dict):
+                    for key, value in result.items():
+                        if isinstance(value, dict):
+                            entry_code = str(key)
+                            entry_name = str(value.get('name', key))
+                            entry_data = json.dumps(value)
+                        else:
+                            entry_code = str(key)
+                            entry_name = str(value)
+                            entry_data = json.dumps({'value': str(value)})
+                        c.execute(
+                            'INSERT INTO api_dictionary_entries (dictionary_id, entry_code, entry_name, entry_data) VALUES (%s, %s, %s, %s)',
+                            (dict_id, entry_code, entry_name, entry_data)
+                        )
+                        entries_added += 1
+
+                c.execute('UPDATE api_dictionaries SET updated_at = CURRENT_TIMESTAMP WHERE id = %s', (dict_id,))
+                conn.commit()
+                conn.close()
+                self.send_json({'success': True, 'entries': entries_added})
+            except Exception as e:
+                conn.close()
                 self.send_json({'error': str(e)}, 500)
         else:
             self.send_response(404)

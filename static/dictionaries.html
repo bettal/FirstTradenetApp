@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Dictionaries - Tradernet</title>
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <link rel="stylesheet" href="/styles.css?v=2">
+    <style>
+        .dict-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1rem; }
+        .dict-card { cursor: pointer; transition: transform 0.15s, border-color 0.15s; padding: 1.25rem; }
+        .dict-card:hover { transform: translateY(-2px); border-color: var(--accent-color); }
+        .dict-card h3 { margin-bottom: 0.25rem; }
+        .dict-card .meta { font-size: 0.75rem; color: var(--text-muted); display: flex; gap: 1rem; margin-top: 0.5rem; }
+        .dict-card .description { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem; }
+        .dict-card .endpoint { font-family: monospace; font-size: 0.7rem; color: var(--accent-color); background: rgba(99, 102, 241, 0.1); padding: 0.15rem 0.4rem; border-radius: 4px; display: inline-block; }
+        .entries-panel { display: none; margin-top: 1rem; background: rgba(15, 23, 42, 0.5); border-radius: 8px; padding: 1rem; max-height: 400px; overflow-y: auto; }
+        .entries-panel.active { display: block; }
+        .entry-row { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.8rem; }
+        .entry-row:last-child { border-bottom: none; }
+        .entry-code { font-family: monospace; color: var(--accent-color); min-width: 80px; }
+        .entry-name { flex: 1; margin: 0 1rem; color: var(--text-main); }
+        .entry-data { font-size: 0.7rem; color: var(--text-muted); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .empty-state { text-align: center; padding: 2rem; color: var(--text-muted); font-size: 0.875rem; }
+        .header-actions { display: flex; gap: 0.5rem; align-items: center; }
+        .wallet-select { padding: 0.5rem 0.75rem; background: rgba(15, 23, 42, 0.6); border: 1px solid var(--glass-border); border-radius: 6px; color: var(--text-main); font-size: 0.8rem; min-width: 160px; }
+        .btn-refresh { padding: 0.5rem 0.75rem; font-size: 0.8rem; }
+        .badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 10px; font-size: 0.65rem; font-weight: 600; }
+        .badge-fresh { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+        .badge-empty { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="dashboard-header">
+            <div style="display: flex; align-items: center; gap: 1rem;">
+                <a href="/dashboard" style="color: var(--text-muted); text-decoration: none; font-size: 0.875rem;">&larr; Dashboard</a>
+                <h2 style="margin: 0;">API Dictionaries</h2>
+            </div>
+            <div class="header-actions">
+                <select id="wallet-select" class="wallet-select">
+                    <option value="">-- Select Wallet --</option>
+                </select>
+                <button id="btn-refresh-all" class="btn-refresh">Refresh All</button>
+                <button id="btn-logout" class="btn-secondary" style="width: auto;">Logout</button>
+            </div>
+        </header>
+        <main>
+            <div id="dict-grid" class="dict-grid"></div>
+        </main>
+    </div>
+
+    <script>
+        let dictionaries = [];
+        let wallets = [];
+
+        async function init() {
+            await loadWallets();
+            await loadDictionaries();
+            document.getElementById('btn-logout').addEventListener('click', () => {
+                document.cookie = 'session_token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
+                window.location.href = '/';
+            });
+            document.getElementById('btn-refresh-all').addEventListener('click', refreshAll);
+        }
+
+        async function loadWallets() {
+            try {
+                const res = await fetch('/api/wallets');
+                if (res.status === 401) { window.location.href = '/'; return; }
+                const data = await res.json();
+                wallets = data.wallets || [];
+                const sel = document.getElementById('wallet-select');
+                wallets.forEach(w => {
+                    const opt = document.createElement('option');
+                    opt.value = w.id;
+                    opt.textContent = w.name;
+                    sel.appendChild(opt);
+                });
+                if (wallets.length > 0) sel.value = wallets[0].id;
+            } catch (e) { console.error(e); }
+        }
+
+        async function loadDictionaries() {
+            try {
+                const res = await fetch('/api/dictionaries');
+                dictionaries = await res.json();
+                renderDictionaries();
+            } catch (e) { console.error(e); }
+        }
+
+        function renderDictionaries() {
+            const grid = document.getElementById('dict-grid');
+            if (dictionaries.length === 0) {
+                grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1">No dictionaries found</div>';
+                return;
+            }
+            grid.innerHTML = dictionaries.map(d => {
+                const hasEntries = d.updated_at && !d.updated_at.startsWith('2026-06-18');
+                return `
+                <div class="glass-panel dict-card" data-code="${d.code}" onclick="toggleDict('${d.code}', this)">
+                    <h3>${d.name}</h3>
+                    <span class="endpoint">${d.endpoint}</span>
+                    <div class="description">${d.description || ''}</div>
+                    <div class="meta">
+                        <span>${hasEntries ? '<span class="badge badge-fresh">cached</span>' : '<span class="badge badge-empty">empty</span>'}</span>
+                        ${d.updated_at ? '<span>' + d.updated_at.replace('T', ' ').substring(0, 19) + '</span>' : '<span>never fetched</span>'}
+                    </div>
+                    <div class="entries-panel" id="entries-${d.code}">
+                        <div class="empty-state">Click to load entries...</div>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        async function toggleDict(code, cardEl) {
+            const panel = document.getElementById('entries-' + code);
+            if (panel.classList.contains('active')) {
+                panel.classList.remove('active');
+                return;
+            }
+            panel.classList.add('active');
+            panel.innerHTML = '<div class="empty-state">Loading...</div>';
+            try {
+                const res = await fetch('/api/dictionaries/' + code);
+                const data = await res.json();
+                if (data.entries && data.entries.length > 0) {
+                    panel.innerHTML = data.entries.map(e => `
+                        <div class="entry-row">
+                            <span class="entry-code">${e.code || '—'}</span>
+                            <span class="entry-name">${e.name || '—'}</span>
+                            <span class="entry-data" title="${JSON.stringify(e.data)}">${JSON.stringify(e.data).substring(0, 60)}${JSON.stringify(e.data).length > 60 ? '...' : ''}</span>
+                        </div>
+                    `).join('');
+                } else {
+                    panel.innerHTML = '<div class="empty-state">No entries cached. Use Refresh to fetch from API.</div>';
+                }
+            } catch (e) {
+                panel.innerHTML = '<div class="empty-state">Failed to load</div>';
+            }
+        }
+
+        async function refreshDict(code) {
+            const walletId = document.getElementById('wallet-select').value;
+            if (!walletId) { alert('Please select a wallet first'); return; }
+            const panel = document.getElementById('entries-' + code);
+            if (panel) panel.innerHTML = '<div class="empty-state">Fetching from Tradernet API...</div>';
+            try {
+                const res = await fetch('/api/dictionaries/' + code + '/refresh', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ walletId: parseInt(walletId) })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    await loadDictionaries();
+                    const card = document.querySelector('.dict-card[data-code="' + code + '"]');
+                    if (card) {
+                        const entriesPanel = document.getElementById('entries-' + code);
+                        if (entriesPanel && entriesPanel.classList.contains('active')) {
+                            await toggleDict(code, card);
+                        }
+                    }
+                } else {
+                    alert('Error: ' + (data.error || 'Unknown error'));
+                }
+            } catch (e) { alert('Network error'); }
+        }
+
+        async function refreshAll() {
+            const walletId = document.getElementById('wallet-select').value;
+            if (!walletId) { alert('Please select a wallet first'); return; }
+            if (!confirm('Fetch all 8 dictionaries from Tradernet API? This may take some time.')) return;
+            for (const d of dictionaries) {
+                const panel = document.getElementById('entries-' + d.code);
+                if (panel && panel.classList.contains('active')) {
+                    panel.innerHTML = '<div class="empty-state">Fetching ' + d.name + '...</div>';
+                }
+                try {
+                    await fetch('/api/dictionaries/' + d.code + '/refresh', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ walletId: parseInt(walletId) })
+                    });
+                } catch (e) { console.error('Failed to refresh', d.code, e); }
+            }
+            await loadDictionaries();
+        }
+
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
