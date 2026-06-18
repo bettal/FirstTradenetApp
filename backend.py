@@ -65,7 +65,9 @@ def verify_totp(secret: str, code: str, window: int = 1) -> bool:
             return True
     return False
 
-PORT = 8000
+import ssl
+
+PORT = int(os.environ.get('PORT', 8000))
 
 # PostgreSQL configuration (use environment variables with defaults)
 DB_HOST = os.environ.get('DB_HOST', 'localhost')
@@ -468,15 +470,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def send_response(self, code, message=None):
         super().send_response(code, message)
         self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        self.send_header('Strict-Transport-Security', 'max-age=31536000')
 
     def do_GET(self):
-        # Basic routing for static pages
-        if self.path == '/':
-            self.path = '/index.html'
-        elif self.path == '/dashboard':
-            self.path = '/dashboard.html'
-        elif self.path == '/dictionaries':
-            self.path = '/dictionaries.html'
+        # SPA routing: serve index.html for non-API frontend routes
+        api_prefix = self.path.startswith('/api/')
+        if not api_prefix:
+            # Check if the requested file exists in static/ directory
+            import os as os_module
+            static_dir = os_module.path.join(os_module.path.dirname(os_module.path.abspath(__file__)), 'static')
+            requested_file = os_module.path.join(static_dir, self.path.lstrip('/'))
+            is_asset = os_module.path.exists(requested_file) and os_module.path.isfile(requested_file)
+
+            if not is_asset:
+                # SPA fallback: serve index.html for any frontend route
+                self.path = '/index.html'
         
         # API Route: Get Wallets
         if self.path == '/api/wallets':
@@ -1277,6 +1285,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         cookie['session_token']['path'] = '/'
         cookie['session_token']['httponly'] = True
         cookie['session_token']['samesite'] = 'Strict'
+        cookie['session_token']['secure'] = True
 
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
@@ -1309,8 +1318,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return None
 
 if __name__ == "__main__":
+    import ssl as _ssl_mod
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.ThreadingTCPServer(("", PORT), Handler) as httpd:
         httpd.allow_reuse_address = True
-        print(f"Serving at port {PORT}")
+
+        cert_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'certs')
+        cert_file = os.path.join(cert_dir, 'cert.pem')
+        key_file = os.path.join(cert_dir, 'key.pem')
+
+        if os.path.exists(cert_file) and os.path.exists(key_file):
+            ctx = _ssl_mod.SSLContext(_ssl_mod.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(cert_file, key_file)
+            httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+            print(f"HTTPS server running at https://localhost:{PORT}")
+        else:
+            print(f"WARNING: certs not found, running HTTP at http://localhost:{PORT}")
+
         httpd.serve_forever()
