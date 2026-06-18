@@ -1,0 +1,14 @@
+node_modules/
+frontend/node_modules/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.git/
+certs/
+logs/
+.env
+.env.docker
+config.py
+db.sqlite
+*.log

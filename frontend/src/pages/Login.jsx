@@ -83,6 +83,11 @@ export default function Login() {
     }
   }, [code, navigate]);
 
+  const handleFormSubmit = useCallback((e) => {
+    e.preventDefault();
+    handleAuth('login');
+  }, [handleAuth]);
+
   if (step === '2fa') {
     return (
       <div className="auth-wrapper">
@@ -133,29 +138,32 @@ export default function Login() {
           <p className="text-dim text-sm">Sign in to your account</p>
         </div>
 
-        <GlassInput
-          label="Phone Number"
-          type="tel"
-          value={phone}
-          onChange={e => setPhone(e.target.value)}
-          placeholder="+1 234 567 8900"
-        />
-        <GlassInput
-          label="Password"
-          type="password"
-          value={password}
-          onChange={e => setPassword(e.target.value)}
-          placeholder="Enter your password"
-        />
+        <form onSubmit={handleFormSubmit}>
+          <GlassInput
+            label="Phone or Email"
+            type="text"
+            value={phone}
+            onChange={e => setPhone(e.target.value)}
+            placeholder="+1 234 567 8900 or user@mail.com"
+            autoComplete="username"
+          />
+          <GlassInput
+            label="Password"
+            type="password"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="Enter your password"
+          />
 
-        <div className="flex gap-2" style={{ marginTop: '1rem' }}>
-          <GlassButton className="flex-1" onClick={() => handleAuth('login')} disabled={loading}>
-            {loading ? 'Loading...' : 'Login'}
-          </GlassButton>
-          <GlassButton variant="secondary" className="flex-1" onClick={() => handleAuth('register')} disabled={loading}>
-            Register
-          </GlassButton>
-        </div>
+          <div className="flex gap-2" style={{ marginTop: '1rem' }}>
+            <GlassButton className="flex-1" type="submit" disabled={loading}>
+              {loading ? 'Loading...' : 'Login'}
+            </GlassButton>
+            <GlassButton variant="secondary" className="flex-1" type="button" onClick={() => handleAuth('register')} disabled={loading}>
+              Register
+            </GlassButton>
+          </div>
+        </form>
 
         {error && <div className="form-error text-center" style={{ marginTop: '0.75rem' }}>{error}</div>}
       </GlassCard>

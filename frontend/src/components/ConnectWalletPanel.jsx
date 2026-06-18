@@ -26,6 +26,10 @@ export default function ConnectWalletPanel({ open, onClose, onDone, editWallet =
       setError('Name, API Key, and Secret Key are required');
       return;
     }
+    if (form.login && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.login)) {
+      setError('Please enter a valid email address for Login');
+      return;
+    }
     setSaving(true);
     setError('');
     try {

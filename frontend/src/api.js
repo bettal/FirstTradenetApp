@@ -149,7 +149,12 @@ export async function executeWalletCommand(walletId, command, params = {}) {
   return res.json();
 }
 
-export function logout() {
+export async function logout() {
+  // Server-side session invalidation
+  try {
+    await apiFetch('/api/auth/logout', { method: 'POST' });
+  } catch {}
+  // Clear client-side cookie
   document.cookie = 'session_token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
   window.location.href = '/login';
 }

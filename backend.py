@@ -1,8 +1,8 @@
 import http.server
 import socketserver
-import threading
 import json
 import os
+import re
 import uuid
 import urllib.parse
 import urllib.request
@@ -13,11 +13,25 @@ import hmac
 import hashlib
 import struct
 import time
+import logging
+from concurrent.futures import ThreadPoolExecutor
 import bcrypt
 import psycopg2
+import psycopg2.pool
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
+
+# Logging setup
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler('logs/backend.log'),
+        logging.StreamHandler()
+    ]
+)
+log = logging.getLogger(__name__)
 
 # Import Tradernet modules for hybrid system
 try:
@@ -32,6 +46,29 @@ TFA_VERIFY_TIMEOUT = 300  # 5 minutes
 CSRF_TOKEN_BYTES = 32
 BRUTE_FORCE_MAX_ATTEMPTS = 5
 BRUTE_FORCE_LOCKOUT_MINUTES = 15
+
+# Thread pool for request handling (max 20 concurrent)
+executor = ThreadPoolExecutor(max_workers=20)
+
+# Session cleanup interval
+SESSION_MAX_AGE = 86400  # 24 hours
+_last_session_cleanup = time.time()
+
+def _cleanup_sessions():
+    """Remove expired in-memory sessions."""
+    global _last_session_cleanup
+    now = time.time()
+    if now - _last_session_cleanup < 3600:
+        return
+    _last_session_cleanup = now
+    expired = []
+    for token, data in list(IN_MEMORY_SESSIONS.items()):
+        if now - data.get('created_at', 0) > SESSION_MAX_AGE:
+            expired.append(token)
+    for token in expired:
+        del IN_MEMORY_SESSIONS[token]
+    if expired:
+        log.info(f"Cleaned up {len(expired)} expired sessions")
 
 def hash_password(password: str) -> str:
     """Hash a password securely using bcrypt."""
@@ -76,15 +113,33 @@ DB_NAME = os.environ.get('DB_NAME', 'tradernet')
 DB_USER = os.environ.get('DB_USER', 'postgres')
 DB_PASSWORD = os.environ.get('DB_PASSWORD', 'postgres')
 
+# Connection pool (min 2, max 20 connections)
+db_pool = None
+
+def _init_db_pool():
+    global db_pool
+    if db_pool is None:
+        db_pool = psycopg2.pool.ThreadedConnectionPool(
+            2, 20,
+            host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
+            user=DB_USER, password=DB_PASSWORD
+        )
+
 def get_db():
-    """Get a new PostgreSQL database connection."""
-    return psycopg2.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD
-    )
+    """Get a database connection from the pool."""
+    _init_db_pool()
+    return db_pool.getconn()
+
+def close_db(conn):
+    """Return a database connection to the pool."""
+    if db_pool and conn:
+        try:
+            db_pool.putconn(conn)
+        except Exception:
+            try:
+                close_db(conn)
+            except Exception:
+                pass
 
 # Initialize DB
 def init_db():
@@ -175,7 +230,12 @@ def init_db():
             ON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name, description=EXCLUDED.description, endpoint=EXCLUDED.endpoint
         """, (code, name, desc, endpoint))
     conn.commit()
-    conn.close()
+    # Create missing indexes (safe IF NOT EXISTS pattern)
+    c.execute('CREATE INDEX IF NOT EXISTS idx_users_session_token ON users(session_token)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_wallets_user_id ON wallets(user_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_dict_entries_dict_id ON api_dictionary_entries(dictionary_id)')
+    conn.commit()
+    close_db(conn)
 
 init_db()
 
@@ -459,7 +519,7 @@ def _api_auth_request(command, params, public_key, private_key, api_base="https:
     }
     url = f"{api_base}/api/v2/cmd/{command}"
     req = urllib.request.Request(url, data=body_str.encode('utf-8'), headers=headers, method='POST')
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read().decode('utf-8'))
 
 
@@ -467,12 +527,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory="static", **kwargs)
 
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except Exception as e:
+            log.error(f"Unhandled error on {self.path}: {e}", exc_info=True)
+            try:
+                self.send_json({'error': 'Internal server error'}, 500)
+            except Exception:
+                pass
+
     def send_response(self, code, message=None):
         super().send_response(code, message)
-        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate, private')
+        self.send_header('Pragma', 'no-cache')
+        self.send_header('Expires', '0')
         self.send_header('Strict-Transport-Security', 'max-age=31536000')
 
     def do_GET(self):
+        _cleanup_sessions()
         # SPA routing: serve index.html for non-API frontend routes
         api_prefix = self.path.startswith('/api/')
         if not api_prefix:
@@ -496,8 +569,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             conn = get_db()
             c = conn.cursor()
             c.execute('SELECT id, name, api_key, login FROM wallets WHERE user_id = %s', (user['id'],))
-            wallets = [{'id': row[0], 'name': row[1], 'api_key': row[2], 'login': row[3] or ''} for row in c.fetchall()]
-            conn.close()
+            wallets = []
+            enc_key = user.get('encryption_key')
+            for row in c.fetchall():
+                login_val = ''
+                if enc_key and row[3]:
+                    try:
+                        login_val = Fernet(enc_key).decrypt(row[3].encode('utf-8')).decode('utf-8')
+                    except Exception:
+                        login_val = row[3]  # fallback for unencrypted data
+                wallets.append({'id': row[0], 'name': row[1], 'api_key': row[2], 'login': login_val})
+            close_db(conn)
             self.send_json({'wallets': wallets, 'totp_enabled': user['totp_enabled'] == 1})
             return
 
@@ -521,7 +603,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c = conn.cursor()
             c.execute('SELECT id, code, name, description, endpoint, category, updated_at FROM api_dictionaries ORDER BY code')
             rows = c.fetchall()
-            conn.close()
+            close_db(conn)
             dicts = [{'id': r[0], 'code': r[1], 'name': r[2], 'description': r[3], 'endpoint': r[4], 'category': r[5], 'updated_at': str(r[6])} for r in rows]
             self.send_json(dicts)
             return
@@ -534,13 +616,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c.execute('SELECT id, code, name, description, endpoint, updated_at FROM api_dictionaries WHERE code = %s', (code,))
             dict_row = c.fetchone()
             if not dict_row:
-                conn.close()
+                close_db(conn)
                 self.send_json({'error': 'Dictionary not found'}, 404)
                 return
             dict_id = dict_row[0]
             c.execute('SELECT id, entry_code, entry_name, entry_data FROM api_dictionary_entries WHERE dictionary_id = %s ORDER BY id', (dict_id,))
             entries = [{'id': r[0], 'code': r[1], 'name': r[2], 'data': r[3]} for r in c.fetchall()]
-            conn.close()
+            close_db(conn)
             self.send_json({'dictionary': {'code': dict_row[1], 'name': dict_row[2], 'description': dict_row[3], 'endpoint': dict_row[4], 'updated_at': str(dict_row[5])}, 'entries': entries, 'count': len(entries)})
             return
 
@@ -568,7 +650,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c = conn.cursor()
             c.execute('SELECT name, api_key, secret_key FROM wallets WHERE id = %s AND user_id = %s', (wallet_id, user['id']))
             wallet = c.fetchone()
-            conn.close()
+            close_db(conn)
 
             if not wallet:
                 self.send_json({'error': 'Wallet not found'}, 404)
@@ -602,6 +684,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             password = data.get('password')
             
             if phone and password:
+                if len(password) < 8:
+                    self.send_json({'error': 'Password must be at least 8 characters'}, 400)
+                    return
                 ok, remaining = self._check_brute_force(phone)
                 if not ok:
                     self.send_json({'error': f'Account locked. Try again in {remaining} seconds.'}, 429)
@@ -611,14 +696,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 c = conn.cursor()
                 c.execute('SELECT id FROM users WHERE phone = %s', (phone,))
                 if c.fetchone():
-                    conn.close()
+                    close_db(conn)
                     self.send_json({'error': 'Phone number already registered'}, 400)
                     return
                 
                 salt = os.urandom(16).hex()
                 c.execute('INSERT INTO users (phone, password_hash, salt) VALUES (%s, %s, %s)', (phone, hash_password(password), salt))
                 conn.commit()
-                conn.close()
+                close_db(conn)
                 self.send_json({'success': True, 'message': 'Account created'})
             else:
                 self.send_json({'error': 'Phone and password required'}, 400)
@@ -627,6 +712,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             phone = data.get('phone')
             password = data.get('password')
             
+            if not phone or not password:
+                self.send_json({'error': 'Phone and password required'}, 400)
+                return
+
             ok, remaining = self._check_brute_force(phone)
             if not ok:
                 self.send_json({'error': f'Account locked. Try again in {remaining} seconds.'}, 429)
@@ -636,7 +725,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c = conn.cursor()
             c.execute('SELECT id, password_hash, totp_enabled, salt FROM users WHERE phone = %s', (phone,))
             user = c.fetchone()
-            conn.close()
+            close_db(conn)
             
             if user and check_password(password, user[1]):
                 salt = user[3]
@@ -668,7 +757,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c = conn.cursor()
             c.execute('SELECT id, totp_secret, totp_enabled, password_hash, salt FROM users WHERE phone = %s', (phone,))
             user = c.fetchone()
-            conn.close()
+            close_db(conn)
             
             if user and user[2] == 1 and check_password(password, user[3]) and user[1] and verify_totp(user[1], code):
                 self._login_user(phone, password, user[4])
@@ -691,7 +780,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c = conn.cursor()
             c.execute('SELECT totp_secret FROM users WHERE id = %s', (user['id'],))
             row = c.fetchone()
-            conn.close()
+            close_db(conn)
 
             if row and row[0] and verify_totp(row[0], code):
                 token = SimpleCookie(self.headers.get('Cookie', '')).get('session_token').value if 'Cookie' in self.headers else None
@@ -713,7 +802,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             row = c.fetchone()
             
             if row[1] == 1:
-                conn.close()
+                close_db(conn)
                 self.send_json({'error': '2FA is already enabled'}, 400)
                 return
                 
@@ -723,7 +812,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 c.execute('UPDATE users SET totp_secret = %s WHERE id = %s', (totp_secret, user['id']))
                 conn.commit()
                 
-            conn.close()
+            close_db(conn)
             
             app_name = urllib.parse.quote("Tradernet Dashboard")
             phone_encoded = urllib.parse.quote(row[2])
@@ -747,12 +836,34 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if row and row[0] and verify_totp(row[0], code):
                 c.execute('UPDATE users SET totp_enabled = 1 WHERE id = %s', (user['id'],))
                 conn.commit()
-                conn.close()
+                close_db(conn)
                 self.send_json({'success': True})
             else:
-                conn.close()
+                close_db(conn)
                 self.send_json({'error': 'Invalid code'}, 400)
                 
+        elif self.path == '/api/auth/logout':
+            user = self.get_user_from_session()
+            if user:
+                token = SimpleCookie(self.headers.get('Cookie', '')).get('session_token')
+                if token:
+                    token_val = token.value
+                    IN_MEMORY_SESSIONS.pop(token_val, None)
+                conn = get_db()
+                c = conn.cursor()
+                c.execute('UPDATE users SET session_token = NULL WHERE id = %s', (user['id'],))
+                conn.commit()
+                close_db(conn)
+                log.info(f"User {user.get('phone')} logged out")
+            cookie = SimpleCookie()
+            cookie['session_token'] = ''
+            cookie['session_token']['path'] = '/'
+            cookie['session_token']['expires'] = 'Thu, 01 Jan 1970 00:00:00 GMT'
+            cookie['session_token']['httponly'] = True
+            cookie['session_token']['samesite'] = 'Strict'
+            cookie['session_token']['secure'] = True
+            self.send_json({'success': True, 'message': 'Logged out'})
+
         elif self.path == '/api/wallets':
             user = self.get_user_from_session()
             if not user:
@@ -768,6 +879,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             secret_key = data.get('secretKey')
             login = data.get('login', '')
             password = data.get('password', '')
+
+            if login and not re.match(r'^[^\s@]+@[^\s@]+\.[^\s@]+$', login):
+                self.send_json({'error': 'Invalid email format for login'}, 400)
+                return
             
             if not user.get('encryption_key'):
                 self.send_json({'error': 'Encryption key missing, please re-login'}, 401)
@@ -776,13 +891,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if api_key and secret_key:
                 f = Fernet(user['encryption_key'])
                 encrypted_secret = f.encrypt(secret_key.encode('utf-8')).decode('utf-8')
+                encrypted_login = f.encrypt(login.encode('utf-8')).decode('utf-8') if login else ''
+                encrypted_password = f.encrypt(password.encode('utf-8')).decode('utf-8') if password else ''
 
                 conn = get_db()
                 c = conn.cursor()
                 c.execute('INSERT INTO wallets (user_id, name, api_key, secret_key, login, password) VALUES (%s, %s, %s, %s, %s, %s)', 
-                          (user['id'], name, api_key, encrypted_secret, login, password))
+                          (user['id'], name, api_key, encrypted_secret, encrypted_login, encrypted_password))
                 conn.commit()
-                conn.close()
+                close_db(conn)
                 self.send_json({'success': True})
             else:
                 self.send_json({'error': 'Missing keys'}, 400)
@@ -805,7 +922,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c = conn.cursor()
             c.execute('SELECT api_key, secret_key FROM wallets WHERE id = %s AND user_id = %s', (wallet_id, user['id']))
             wallet = c.fetchone()
-            conn.close()
+            close_db(conn)
 
             if not wallet:
                 self.send_json({'error': 'Wallet not found'}, 404)
@@ -852,7 +969,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c = conn.cursor()
             c.execute('SELECT api_key, secret_key FROM wallets WHERE id = %s AND user_id = %s', (wallet_id, user['id']))
             wallet = c.fetchone()
-            conn.close()
+            close_db(conn)
 
             if not wallet:
                 self.send_json({'error': 'Wallet not found'}, 404)
@@ -925,7 +1042,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c = conn.cursor()
             c.execute('SELECT api_key, secret_key FROM wallets WHERE id = %s AND user_id = %s', (wallet_id, user['id']))
             wallet = c.fetchone()
-            conn.close()
+            close_db(conn)
 
             if not wallet:
                 self.send_json({'error': 'Wallet not found'}, 404)
@@ -993,7 +1110,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c.execute('SELECT id, endpoint FROM api_dictionaries WHERE code = %s', (code,))
             dict_row = c.fetchone()
             if not dict_row:
-                conn.close()
+                close_db(conn)
                 self.send_json({'error': 'Dictionary not found'}, 404)
                 return
 
@@ -1002,19 +1119,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
             wallet_id = data.get('walletId')
             if not wallet_id:
-                conn.close()
+                close_db(conn)
                 self.send_json({'error': 'walletId required'}, 400)
                 return
 
             c.execute('SELECT api_key, secret_key FROM wallets WHERE id = %s AND user_id = %s', (wallet_id, user['id']))
             wallet = c.fetchone()
             if not wallet:
-                conn.close()
+                close_db(conn)
                 self.send_json({'error': 'Wallet not found'}, 404)
                 return
 
             if not user.get('encryption_key'):
-                conn.close()
+                close_db(conn)
                 self.send_json({'error': 'Encryption key missing, please re-login'}, 401)
                 return
 
@@ -1060,10 +1177,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
                 c.execute('UPDATE api_dictionaries SET updated_at = CURRENT_TIMESTAMP WHERE id = %s', (dict_id,))
                 conn.commit()
-                conn.close()
+                close_db(conn)
                 self.send_json({'success': True, 'entries': entries_added})
             except Exception as e:
-                conn.close()
+                close_db(conn)
                 self.send_json({'error': str(e)}, 500)
         else:
             self.send_response(404)
@@ -1100,7 +1217,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c.execute('DELETE FROM wallets WHERE id = %s AND user_id = %s', (wallet_id, user['id']))
             conn.commit()
             deleted = c.rowcount
-            conn.close()
+            close_db(conn)
             
             if deleted > 0:
                 self.send_json({'success': True})
@@ -1116,7 +1233,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not user:
             return True  # Let the auth check handle 401
         # Exempt auth endpoints that establish or validate sessions
-        if self.path in ('/api/auth/login', '/api/auth/register', '/api/auth/verify-2fa'):
+        if self.path in ('/api/auth/login', '/api/auth/register', '/api/auth/verify-2fa', '/api/auth/logout'):
             return True
         token = self.headers.get('X-CSRF-Token', '')
         expected = user.get('csrf_token', '')
@@ -1132,7 +1249,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         """Increment failed_attempts and lock if threshold exceeded."""
         conn = get_db()
         c = conn.cursor()
-        c.execute('SELECT failed_attempts FROM users WHERE phone = %s', (phone,))
+        c.execute('SELECT failed_attempts FROM users WHERE phone = %s FOR UPDATE', (phone,))
         row = c.fetchone()
         if row:
             attempts = (row[0] or 0) + 1
@@ -1143,7 +1260,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 c.execute('UPDATE users SET failed_attempts = %s WHERE phone = %s', (attempts, phone))
             conn.commit()
             time.sleep(min(attempts * 0.5, 3))
-        conn.close()
+        close_db(conn)
 
     def _check_brute_force(self, phone):
         """Check if account is locked. Returns (ok, lock_seconds_remaining)."""
@@ -1151,7 +1268,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         c = conn.cursor()
         c.execute('SELECT locked_until FROM users WHERE phone = %s', (phone,))
         row = c.fetchone()
-        conn.close()
+        close_db(conn)
         if row and row[0]:
             remaining = (row[0].timestamp() - time.time())
             if remaining > 0:
@@ -1197,6 +1314,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             login = data.get('login')
             password = data.get('password')
 
+            if login and not re.match(r'^[^\s@]+@[^\s@]+\.[^\s@]+$', login):
+                self.send_json({'error': 'Invalid email format for login'}, 400)
+                return
+
             if not wallet_id:
                 self.send_json({'error': 'Missing wallet ID'}, 400)
                 return
@@ -1219,11 +1340,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 updates.append('secret_key = %s')
                 values.append(encrypted)
             if login is not None:
+                f = Fernet(user['encryption_key'])
                 updates.append('login = %s')
-                values.append(login)
+                values.append(f.encrypt(login.encode('utf-8')).decode('utf-8') if login else '')
             if password is not None:
+                f = Fernet(user['encryption_key'])
                 updates.append('password = %s')
-                values.append(password)
+                values.append(f.encrypt(password.encode('utf-8')).decode('utf-8') if password else '')
 
             if not updates:
                 self.send_json({'error': 'Nothing to update'}, 400)
@@ -1238,7 +1361,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c.execute(sql, values)
             conn.commit()
             updated = c.rowcount
-            conn.close()
+            close_db(conn)
 
             if updated > 0:
                 self.send_json({'success': True, 'message': 'Wallet updated'})
@@ -1272,13 +1395,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             'encryption_key': encryption_key,
             '2fa_verified_at': None,
             'csrf_token': csrf_token,
+            'created_at': time.time(),
         }
 
         conn = get_db()
         c = conn.cursor()
         c.execute('UPDATE users SET session_token = %s, failed_attempts = 0, locked_until = NULL WHERE phone = %s', (session_token, phone))
         conn.commit()
-        conn.close()
+        close_db(conn)
 
         cookie = SimpleCookie()
         cookie['session_token'] = session_token
@@ -1302,7 +1426,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 c = conn.cursor()
                 c.execute('SELECT id, phone, totp_enabled, failed_attempts, locked_until FROM users WHERE session_token = %s', (token,))
                 user = c.fetchone()
-                conn.close()
+                close_db(conn)
                 if user:
                     session_data = IN_MEMORY_SESSIONS.get(token, {})
                     return {

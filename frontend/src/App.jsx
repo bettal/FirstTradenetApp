@@ -119,6 +119,17 @@ function Layout() {
 }
 
 export default function App() {
+  // Protect against back-button after logout (bfcache restore)
+  useEffect(() => {
+    const handlePageShow = (event) => {
+      if (event.persisted && window.location.pathname !== '/login') {
+        window.location.reload();
+      }
+    };
+    window.addEventListener('pageshow', handlePageShow);
+    return () => window.removeEventListener('pageshow', handlePageShow);
+  }, []);
+
   return (
     <BrowserRouter>
       <ParticleBg />
