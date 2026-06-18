@@ -1,5 +1,26 @@
 // Simple Frontend Router & Logic
 
+let csrfToken = '';
+
+async function fetchCSRF() {
+    try {
+        const res = await fetch('/api/csrf-token');
+        if (res.ok) {
+            const data = await res.json();
+            csrfToken = data.csrfToken || '';
+        }
+    } catch (e) { csrfToken = ''; }
+}
+
+function apiFetch(url, options = {}) {
+    const headers = options.headers || {};
+    if (csrfToken && (options.method || 'GET').toUpperCase() !== 'GET') {
+        headers['X-CSRF-Token'] = csrfToken;
+    }
+    headers['Content-Type'] = headers['Content-Type'] || 'application/json';
+    return fetch(url, { ...options, headers });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     const path = window.location.pathname;
     
@@ -37,7 +58,7 @@ function initLogin() {
         const endpoint = action === 'login' ? '/api/auth/login' : '/api/auth/register';
         
         try {
-            const res = await fetch(endpoint, {
+            const res = await apiFetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ phone, password })
@@ -85,7 +106,7 @@ function initLogin() {
         errorDiv.classList.add('hidden');
         
         try {
-            const res = await fetch('/api/auth/verify-2fa', {
+            const res = await apiFetch('/api/auth/verify-2fa', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ phone, password, code })
@@ -112,6 +133,7 @@ function initLogin() {
 
 // --- Dashboard Logic ---
 function initDashboard() {
+    fetchCSRF(); // Fetch CSRF token for mutating requests
     const walletsContainer = document.getElementById('wallets-container');
     const modal = document.getElementById('connect-modal');
     const btnOpenModal = document.getElementById('btn-open-modal');
@@ -126,7 +148,7 @@ function initDashboard() {
 
     async function loadWallets() {
         try {
-            const res = await fetch('/api/wallets');
+            const res = await apiFetch('/api/wallets');
             if (res.status === 401) {
                 window.location.href = '/';
                 return;
@@ -230,7 +252,7 @@ function initDashboard() {
 
     async function loadExplorerCommands() {
         try {
-            const res = await fetch('/api/commands');
+            const res = await apiFetch('/api/commands');
             if (res.ok) {
                 explorerCommands = await res.json();
                 populateCategories();
@@ -368,7 +390,7 @@ function initDashboard() {
         errorDiv.classList.add('hidden');
 
         try {
-            const res = await fetch('/api/auth/reverify-2fa', {
+            const res = await apiFetch('/api/auth/reverify-2fa', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ code })
@@ -437,7 +459,7 @@ function initDashboard() {
         if (password) body.password = password;
 
         try {
-            const res = await fetch('/api/wallets', {
+            const res = await apiFetch('/api/wallets', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body)
@@ -487,7 +509,7 @@ function initDashboard() {
             if (confirm('Are you sure you want to delete this wallet?')) {
                 const walletId = deleteBtn.dataset.id;
                 try {
-                    const res = await fetch('/api/wallets', {
+                    const res = await apiFetch('/api/wallets', {
                         method: 'DELETE',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ id: walletId })
@@ -520,7 +542,7 @@ function initDashboard() {
                 editWalletModal.classList.add('active');
                 // Fetch current secret key and fill it in (masked)
                 try {
-                    const res = await fetch(`/api/wallets/secret?id=${card.dataset.id}`);
+                    const res = await apiFetch(`/api/wallets/secret?id=${card.dataset.id}`);
                     const data = await res.json();
                     if (res.ok) {
                         document.getElementById('edit-secret-key').value = data.secret_key;
@@ -543,7 +565,7 @@ function initDashboard() {
                 document.getElementById('secret-error').classList.add('hidden');
                 secretModal.classList.add('active');
                 try {
-                    const res = await fetch(`/api/wallets/secret?id=${card.dataset.id}`);
+                    const res = await apiFetch(`/api/wallets/secret?id=${card.dataset.id}`);
                     const data = await res.json();
                     if (res.ok) {
                         document.getElementById('secret-api-key').textContent = data.api_key;
@@ -619,7 +641,7 @@ function initDashboard() {
         apiResponse.textContent = "Loading...";
 
         try {
-            const res = await fetch('/api/wallet-command', {
+            const res = await apiFetch('/api/wallet-command', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ walletId, command: commandName, params })
@@ -643,7 +665,7 @@ function initDashboard() {
         errorDiv.classList.add('hidden');
 
         try {
-            const res = await fetch('/api/wallets', {
+            const res = await apiFetch('/api/wallets', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name, apiKey, secretKey, login, password })
@@ -707,7 +729,7 @@ function initDashboard() {
         btnSetup2fa.addEventListener('click', async () => {
             securityErrorMain.classList.add('hidden');
             try {
-                const res = await fetch('/api/auth/setup-2fa', { method: 'POST' });
+                const res = await apiFetch('/api/auth/setup-2fa', { method: 'POST' });
                 const data = await res.json();
                 
                 if (res.ok) {
@@ -740,7 +762,7 @@ function initDashboard() {
             securityErrorSetup.classList.add('hidden');
             
             try {
-                const res = await fetch('/api/auth/confirm-2fa', {
+                const res = await apiFetch('/api/auth/confirm-2fa', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ code })

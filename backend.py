@@ -29,6 +29,9 @@ except ImportError:
 
 IN_MEMORY_SESSIONS = {}
 TFA_VERIFY_TIMEOUT = 300  # 5 minutes
+CSRF_TOKEN_BYTES = 32
+BRUTE_FORCE_MAX_ATTEMPTS = 5
+BRUTE_FORCE_LOCKOUT_MINUTES = 15
 
 def hash_password(password: str) -> str:
     """Hash a password securely using bcrypt."""
@@ -101,6 +104,8 @@ def init_db():
         ('password_hash', 'TEXT'),
         ('totp_enabled', 'INTEGER DEFAULT 0'),
         ('salt', 'TEXT'),
+        ('failed_attempts', 'INTEGER DEFAULT 0'),
+        ('locked_until', 'TIMESTAMP'),
     ]:
         c.execute(f"""
             DO $$ BEGIN
@@ -493,6 +498,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_json(COMMANDS_REGISTRY)
             return
 
+        # API Route: Get CSRF Token
+        if self.path == '/api/csrf-token':
+            user = self.get_user_from_session()
+            if not user:
+                self.send_json({'error': 'Unauthorized'}, 401)
+                return
+            self.send_json({'csrfToken': user.get('csrf_token', '')})
+            return
+
         # API Route: List Dictionaries
         if self.path == '/api/dictionaries':
             conn = get_db()
@@ -565,6 +579,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
+
+        # CSRF check for all mutating API endpoints
+        if self.path.startswith('/api/') and not self._check_csrf():
+            return
         
         try:
             data = json.loads(post_data.decode('utf-8'))
@@ -576,6 +594,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             password = data.get('password')
             
             if phone and password:
+                ok, remaining = self._check_brute_force(phone)
+                if not ok:
+                    self.send_json({'error': f'Account locked. Try again in {remaining} seconds.'}, 429)
+                    return
+
                 conn = get_db()
                 c = conn.cursor()
                 c.execute('SELECT id FROM users WHERE phone = %s', (phone,))
@@ -596,6 +619,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             phone = data.get('phone')
             password = data.get('password')
             
+            ok, remaining = self._check_brute_force(phone)
+            if not ok:
+                self.send_json({'error': f'Account locked. Try again in {remaining} seconds.'}, 429)
+                return
+
             conn = get_db()
             c = conn.cursor()
             c.execute('SELECT id, password_hash, totp_enabled, salt FROM users WHERE phone = %s', (phone,))
@@ -611,6 +639,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # No 2FA, log in immediately
                     self._login_user(phone, password, salt)
             else:
+                self._record_failed_attempt(phone)
                 self.send_json({'error': 'Invalid phone or password'}, 401)
                 
         elif self.path == '/api/auth/verify-2fa':
@@ -620,6 +649,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             
             if not phone or not password or not code:
                 self.send_json({'error': 'Missing data'}, 400)
+                return
+
+            ok, remaining = self._check_brute_force(phone)
+            if not ok:
+                self.send_json({'error': f'Account locked. Try again in {remaining} seconds.'}, 429)
                 return
             
             conn = get_db()
@@ -631,6 +665,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if user and user[2] == 1 and check_password(password, user[3]) and user[1] and verify_totp(user[1], code):
                 self._login_user(phone, password, user[4])
             else:
+                self._record_failed_attempt(phone)
                 self.send_json({'error': 'Invalid code or password'}, 401)
                 
         elif self.path == '/api/auth/reverify-2fa':
@@ -1027,6 +1062,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
 
     def do_DELETE(self):
+        # CSRF check for all mutating API endpoints
+        if self.path.startswith('/api/') and not self._check_csrf():
+            return
+
         content_length = int(self.headers.get('Content-Length', 0))
         if content_length > 0:
             post_data = self.rfile.read(content_length)
@@ -1063,6 +1102,54 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def _check_csrf(self):
+        """Validate CSRF token. Returns True if valid, sends error and returns False otherwise."""
+        user = self.get_user_from_session()
+        if not user:
+            return True  # Let the auth check handle 401
+        # Exempt auth endpoints that establish or validate sessions
+        if self.path in ('/api/auth/login', '/api/auth/register', '/api/auth/verify-2fa'):
+            return True
+        token = self.headers.get('X-CSRF-Token', '')
+        expected = user.get('csrf_token', '')
+        if not token or not expected:
+            self.send_json({'error': 'CSRF token missing'}, 403)
+            return False
+        if not hmac.compare_digest(token, expected):
+            self.send_json({'error': 'Invalid CSRF token'}, 403)
+            return False
+        return True
+
+    def _record_failed_attempt(self, phone):
+        """Increment failed_attempts and lock if threshold exceeded."""
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('SELECT failed_attempts FROM users WHERE phone = %s', (phone,))
+        row = c.fetchone()
+        if row:
+            attempts = (row[0] or 0) + 1
+            if attempts >= BRUTE_FORCE_MAX_ATTEMPTS:
+                c.execute("UPDATE users SET failed_attempts = %s, locked_until = NOW() + interval '%s minutes' WHERE phone = %s",
+                          (attempts, BRUTE_FORCE_LOCKOUT_MINUTES, phone))
+            else:
+                c.execute('UPDATE users SET failed_attempts = %s WHERE phone = %s', (attempts, phone))
+            conn.commit()
+            time.sleep(min(attempts * 0.5, 3))
+        conn.close()
+
+    def _check_brute_force(self, phone):
+        """Check if account is locked. Returns (ok, lock_seconds_remaining)."""
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('SELECT locked_until FROM users WHERE phone = %s', (phone,))
+        row = c.fetchone()
+        conn.close()
+        if row and row[0]:
+            remaining = (row[0].timestamp() - time.time())
+            if remaining > 0:
+                return False, int(remaining)
+        return True, 0
+
     def _require_2fa_verified(self, user):
         now = time.time()
         last = user.get('2fa_verified_at')
@@ -1072,6 +1159,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return True
 
     def do_PUT(self):
+        # CSRF check for all mutating API endpoints
+        if self.path.startswith('/api/') and not self._check_csrf():
+            return
+
         content_length = int(self.headers.get('Content-Length', 0))
         if content_length > 0:
             put_data = self.rfile.read(content_length)
@@ -1166,21 +1257,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             iterations=390000,
         )
         encryption_key = base64.urlsafe_b64encode(kdf.derive(password.encode('utf-8')))
-        
+
+        csrf_token = base64.urlsafe_b64encode(os.urandom(CSRF_TOKEN_BYTES)).decode('utf-8')
         session_token = str(uuid.uuid4())
-        IN_MEMORY_SESSIONS[session_token] = {'encryption_key': encryption_key, '2fa_verified_at': None}
+        IN_MEMORY_SESSIONS[session_token] = {
+            'encryption_key': encryption_key,
+            '2fa_verified_at': None,
+            'csrf_token': csrf_token,
+        }
 
         conn = get_db()
         c = conn.cursor()
-        c.execute('UPDATE users SET session_token = %s WHERE phone = %s', (session_token, phone))
+        c.execute('UPDATE users SET session_token = %s, failed_attempts = 0, locked_until = NULL WHERE phone = %s', (session_token, phone))
         conn.commit()
         conn.close()
-        
+
         cookie = SimpleCookie()
         cookie['session_token'] = session_token
         cookie['session_token']['path'] = '/'
         cookie['session_token']['httponly'] = True
-        
+        cookie['session_token']['samesite'] = 'Strict'
+
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
         self.send_header('Set-Cookie', cookie.output(header='', sep=''))
@@ -1194,7 +1291,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 token = cookie['session_token'].value
                 conn = get_db()
                 c = conn.cursor()
-                c.execute('SELECT id, phone, totp_enabled FROM users WHERE session_token = %s', (token,))
+                c.execute('SELECT id, phone, totp_enabled, failed_attempts, locked_until FROM users WHERE session_token = %s', (token,))
                 user = c.fetchone()
                 conn.close()
                 if user:
@@ -1203,8 +1300,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         'id': user[0],
                         'phone': user[1],
                         'totp_enabled': user[2],
+                        'failed_attempts': user[3],
+                        'locked_until': user[4],
                         'encryption_key': session_data.get('encryption_key'),
                         '2fa_verified_at': session_data.get('2fa_verified_at'),
+                        'csrf_token': session_data.get('csrf_token'),
                     }
         return None
 

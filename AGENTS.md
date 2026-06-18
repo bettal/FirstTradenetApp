@@ -25,6 +25,13 @@
 - Navigate to `/dictionaries` to browse, expand entries, and refresh them from the live API.
 - Refresh requires a selected wallet; entries are fetched via `/api/dictionaries/<code>/refresh` (POST) and cached in `api_dictionary_entries`.
 
+## Security
+- **CSRF**: all mutating API endpoints (POST/PUT/DELETE) require `X-CSRF-Token` header. Token fetched via `GET /api/csrf-token`. Login/register/verify-2fa endpoints are exempt.
+- **Brute-force**: after 5 failed login/2fa attempts, account locked for 15 minutes. Progressive delay (up to 3s) on each failure. Columns: `failed_attempts`, `locked_until` on `users`.
+- **2FA**: TOTP-based (Google Authenticator). Required to connect wallets. 5-min re-verify window for sensitive operations.
+- **Wallet secrets**: encrypted at rest with Fernet (key derived from user password via PBKDF2-SHA256, 390k iterations).
+- Session cookie: `HttpOnly`, `SameSite=Strict`.
+
 ## What's missing
 - **No tests** at all. No test framework, no test directory.
 - **No linter, no typechecker, no formatter** config.

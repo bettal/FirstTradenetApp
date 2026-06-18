@@ -55,8 +55,26 @@
     <script>
         let dictionaries = [];
         let wallets = [];
+        let csrfToken = '';
+
+        async function fetchCSRF() {
+            try {
+                const res = await fetch('/api/csrf-token');
+                if (res.ok) { const d = await res.json(); csrfToken = d.csrfToken || ''; }
+            } catch (e) { csrfToken = ''; }
+        }
+
+        function apiFetch(url, options = {}) {
+            const headers = options.headers || {};
+            if (csrfToken && (options.method || 'GET').toUpperCase() !== 'GET') {
+                headers['X-CSRF-Token'] = csrfToken;
+            }
+            headers['Content-Type'] = headers['Content-Type'] || 'application/json';
+            return fetch(url, { ...options, headers });
+        }
 
         async function init() {
+            await fetchCSRF();
             await loadWallets();
             await loadDictionaries();
             document.getElementById('btn-logout').addEventListener('click', () => {
@@ -68,7 +86,7 @@
 
         async function loadWallets() {
             try {
-                const res = await fetch('/api/wallets');
+                const res = await apiFetch('/api/wallets');
                 if (res.status === 401) { window.location.href = '/'; return; }
                 const data = await res.json();
                 wallets = data.wallets || [];
@@ -85,7 +103,7 @@
 
         async function loadDictionaries() {
             try {
-                const res = await fetch('/api/dictionaries');
+                const res = await apiFetch('/api/dictionaries');
                 dictionaries = await res.json();
                 renderDictionaries();
             } catch (e) { console.error(e); }
@@ -124,7 +142,7 @@
             panel.classList.add('active');
             panel.innerHTML = '<div class="empty-state">Loading...</div>';
             try {
-                const res = await fetch('/api/dictionaries/' + code);
+                const res = await apiFetch('/api/dictionaries/' + code);
                 const data = await res.json();
                 if (data.entries && data.entries.length > 0) {
                     panel.innerHTML = data.entries.map(e => `
@@ -148,7 +166,7 @@
             const panel = document.getElementById('entries-' + code);
             if (panel) panel.innerHTML = '<div class="empty-state">Fetching from Tradernet API...</div>';
             try {
-                const res = await fetch('/api/dictionaries/' + code + '/refresh', {
+                const res = await apiFetch('/api/dictionaries/' + code + '/refresh', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ walletId: parseInt(walletId) })
@@ -179,7 +197,7 @@
                     panel.innerHTML = '<div class="empty-state">Fetching ' + d.name + '...</div>';
                 }
                 try {
-                    await fetch('/api/dictionaries/' + d.code + '/refresh', {
+                    await apiFetch('/api/dictionaries/' + d.code + '/refresh', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ walletId: parseInt(walletId) })
