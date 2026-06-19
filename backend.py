@@ -23,8 +23,9 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 
 # Logging setup
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.FileHandler('logs/backend.log'),
@@ -95,8 +96,8 @@ def verify_totp(secret: str, code: str, window: int = 1) -> bool:
     current_time = int(time.time()) // 30
     for i in range(-window, window + 1):
         msg = struct.pack(">Q", current_time + i)
-        h = hmac.new(key, msg, hashlib.sha1).digest()
-        o = h[19] & 15
+        h = hmac.new(key, msg, hashlib.sha256).digest()
+        o = h[-1] & 15
         h = (struct.unpack(">I", h[o:o+4])[0] & 0x7fffffff) % 1000000
         if f"{h:06d}" == code:
             return True
@@ -1527,6 +1528,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 close_db(conn)
                 if user:
                     session_data = IN_MEMORY_SESSIONS.get(token, {})
+                    if token in IN_MEMORY_SESSIONS:
+                        IN_MEMORY_SESSIONS[token]['created_at'] = time.time()
                     return {
                         'id': user[0],
                         'phone': user[1],
