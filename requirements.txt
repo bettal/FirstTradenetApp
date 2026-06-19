@@ -3,3 +3,7 @@ bcrypt>=4.0
 cryptography>=41.0
 tradernet-sdk
 tradernet-api
+
+# KMS providers (optional, uncomment based on KMS_PROVIDER):
+# hvac>=2.0            # HashiCorp Vault
+# boto3>=1.35          # AWS Secrets Manager

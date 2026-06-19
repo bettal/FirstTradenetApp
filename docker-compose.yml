@@ -17,6 +17,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      vault:
+        condition: service_started
+        required: false
     restart: unless-stopped
 
   nginx:
@@ -30,6 +33,22 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+
+  # ── Optional: HashiCorp Vault for secret management ──────────────
+  # To enable: docker compose --profile vault up
+  # Access:   http://localhost:8200
+  # Init:     docker compose exec vault vault operator init
+  # Unseal:   docker compose exec vault vault operator unseal <key>
+  vault:
+    image: vault:1.18
+    profiles: ["vault"]
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root-token
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    ports:
+      - "8200:8200"
 
 volumes:
   pgdata:

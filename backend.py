@@ -118,35 +118,42 @@ if os.path.exists(_env_path):
                 if _k.strip() not in os.environ:
                     os.environ[_k.strip()] = _v.strip()
 
-# PostgreSQL configuration (use environment variables with defaults)
-DB_HOST = os.environ.get('DB_HOST', 'localhost')
-DB_PORT = int(os.environ.get('DB_PORT', 5432))
-DB_NAME = os.environ.get('DB_NAME', 'tradernet')
-DB_USER = os.environ.get('DB_USER', 'postgres')
-DB_PASSWORD = os.environ.get('DB_PASSWORD', 'postgres')
+# KMS — unified secret management (env / Vault / AWS)
+try:
+    from kms import kms_get, kms_get_or_generate
+except ImportError:
+    def kms_get(key, default=None):
+        return os.environ.get(key, default)
+    def kms_get_or_generate(key):
+        val = os.environ.get(key)
+        if val:
+            return val
+        val = base64.urlsafe_b64encode(os.urandom(32)).decode('utf-8')
+        os.environ[key] = val
+        log.warning(f"Generated {key} — save this to .env!")
+        return val
 
-# Server-level encryption key (for totp_secret, phone HMAC)
-# Generated on first run, stored in env var for persistence across restarts
-SERVER_KEY = os.environ.get('SERVER_ENCRYPTION_KEY')
-if not SERVER_KEY:
-    SERVER_KEY = base64.urlsafe_b64encode(os.urandom(32)).decode('utf-8')
-    os.environ['SERVER_ENCRYPTION_KEY'] = SERVER_KEY
-    log.warning("Generated new SERVER_ENCRYPTION_KEY — save this to .env for persistence!")
+# PostgreSQL configuration (via KMS)
+DB_HOST = kms_get('DB_HOST', 'localhost')
+DB_PORT = int(kms_get('DB_PORT', '5432'))
+DB_NAME = kms_get('DB_NAME', 'tradernet')
+DB_USER = kms_get('DB_USER', 'postgres')
+DB_PASSWORD = kms_get('DB_PASSWORD', 'postgres')
 
-_server_fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(SERVER_KEY.encode()).digest()))
-phone_hmac_key = SERVER_KEY.encode()
+# Server-level encryption key (via KMS)
+SERVER_KEY = kms_get_or_generate('SERVER_ENCRYPTION_KEY')
+
+# Centralized crypto (key versioning, rotation, separate HMAC key)
+from crypto import encrypt_server, decrypt_server, phone_hash as crypto_phone_hash
 
 def server_encrypt(value):
-    """Encrypt data with the server-level Fernet key."""
-    return _server_fernet.encrypt(value.encode('utf-8')).decode('utf-8')
+    return encrypt_server(value)
 
 def server_decrypt(value):
-    """Decrypt data with the server-level Fernet key."""
-    return _server_fernet.decrypt(value.encode('utf-8')).decode('utf-8')
+    return decrypt_server(value)
 
 def phone_hash(phone: str) -> str:
-    """Compute HMAC-SHA256 hash of phone for lookup."""
-    return hmac.new(phone_hmac_key, phone.encode('utf-8'), hashlib.sha256).hexdigest()
+    return crypto_phone_hash(phone)
 
 # Connection pool (min 2, max 20 connections)
 db_pool = None
@@ -593,6 +600,37 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory="static", **kwargs)
 
+    def _check_rate_limit(self):
+        """Application-level rate limiting (defense-in-depth). Returns False if rate limited."""
+        if not self.path.startswith('/api/'):
+            return True
+        try:
+            from rate_limit import check_rate_limit, get_client_ip
+            ip = get_client_ip(dict(self.headers), self.client_address)
+            is_auth = self.path.startswith('/api/auth/')
+            allowed, retry_after, remaining, limit = check_rate_limit(ip, is_auth)
+            self._rate_limit_remaining = remaining
+            self._rate_limit_limit = limit
+            if not allowed:
+                self.send_rate_limited(retry_after)
+                log.warning(f"Rate limit exceeded for {ip} on {self.path}")
+                return False
+        except ImportError:
+            self._rate_limit_remaining = -1
+            self._rate_limit_limit = -1
+        return True
+
+    def send_rate_limited(self, retry_after: float):
+        """Send 429 Too Many Requests response."""
+        self.send_response(429)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Retry-After', str(int(retry_after) + 1))
+        self.send_header('X-RateLimit-Limit', str(self._rate_limit_limit))
+        self.send_header('X-RateLimit-Remaining', '0')
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(json.dumps({'error': 'Too many requests'}).encode())
+
     def handle_one_request(self):
         try:
             super().handle_one_request()
@@ -611,6 +649,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Strict-Transport-Security', 'max-age=31536000')
 
     def do_GET(self):
+        if not self._check_rate_limit():
+            return
         _cleanup_sessions()
         # SPA routing: serve index.html for non-API frontend routes
         api_prefix = self.path.startswith('/api/')
@@ -753,8 +793,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         return super().do_GET()
+        if not self._check_rate_limit():
+            return
 
     def do_POST(self):
+        if not self._check_rate_limit():
+            return
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
 
@@ -772,8 +816,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             password = data.get('password')
             
             if phone and password:
-                if len(password) < 8:
-                    self.send_json({'error': 'Password must be at least 8 characters'}, 400)
+                from security import validate_password_strength, is_password_pwned
+                pw_error = validate_password_strength(password)
+                if pw_error:
+                    self.send_json({'error': pw_error}, 400)
+                    return
+                if is_password_pwned(password):
+                    self.send_json({'error': 'This password has appeared in data breaches. Please choose a different password.'}, 400)
                     return
                 ok, remaining = self._check_brute_force(phone)
                 if not ok:
@@ -967,6 +1016,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 
             if user['totp_enabled'] != 1:
                 self.send_json({'error': '2FA must be enabled to connect a wallet'}, 403)
+                return
+
+            if not self._require_2fa_verified(user):
                 return
                 
             name = data.get('name', 'My Wallet')
@@ -1283,6 +1335,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
 
     def do_DELETE(self):
+        if not self._check_rate_limit():
+            return
         # CSRF check for all mutating API endpoints
         if self.path.startswith('/api/') and not self._check_csrf():
             return
@@ -1302,7 +1356,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not user:
                 self.send_json({'error': 'Unauthorized'}, 401)
                 return
-            
+
+            if not self._require_2fa_verified(user):
+                return
+
             wallet_id = data.get('id')
             if not wallet_id:
                 self.send_json({'error': 'Missing wallet ID'}, 400)
@@ -1374,12 +1431,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _require_2fa_verified(self, user):
         now = time.time()
         last = user.get('2fa_verified_at')
+        if not self._check_rate_limit():
+            return
         if last is None or (now - last) > TFA_VERIFY_TIMEOUT:
             self.send_json({'error': '2FA verification required', 'code': '2FA_REQUIRED'}, 401)
             return False
         return True
 
     def do_PUT(self):
+        if not self._check_rate_limit():
+            return
         # CSRF check for all mutating API endpoints
         if self.path.startswith('/api/') and not self._check_csrf():
             return
@@ -1472,6 +1533,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_response(status)
         self.send_header('Content-type', 'application/json')
         self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        # Rate limit headers (if rate limiting is active)
+        if hasattr(self, '_rate_limit_remaining') and self._rate_limit_remaining >= 0:
+            self.send_header('X-RateLimit-Limit', str(self._rate_limit_limit))
+            self.send_header('X-RateLimit-Remaining', str(self._rate_limit_remaining))
         self.end_headers()
         self.wfile.write(json.dumps(data).encode())
 
