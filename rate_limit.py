@@ -28,10 +28,10 @@ _GENERAL_RATE = 10       # requests
 _GENERAL_WINDOW = 1.0     # seconds
 _GENERAL_BURST = 20
 
-# Auth endpoints: 5 req/min, burst 3 (matching nginx config)
-_AUTH_RATE = 5            # requests
+# Auth endpoints: 10 req/min, burst 6
+_AUTH_RATE = 10           # requests
 _AUTH_WINDOW = 60.0        # seconds
-_AUTH_BURST = 3
+_AUTH_BURST = 6
 
 # Cleanup: remove IPs with no requests in this many seconds
 _CLEANUP_AGE = 300  # 5 minutes

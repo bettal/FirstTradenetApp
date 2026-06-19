@@ -960,7 +960,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             
             app_name = urllib.parse.quote("Tradernet Dashboard")
             phone_encoded = urllib.parse.quote(row[2])
-            uri = f"otpauth://totp/{app_name}:{phone_encoded}?secret={totp_secret}&issuer={app_name}"
+            uri = f"otpauth://totp/{app_name}:{phone_encoded}?secret={totp_secret}&issuer={app_name}&algorithm=SHA256"
             
             self.send_json({'setupUri': uri})
             
