@@ -66,6 +66,7 @@ def _cleanup_stale(now: float):
 
 def _check(store: dict, ip: str, rate: int, window: float, burst: int, now: float) -> Tuple[bool, float]:
     """Check rate limit for an IP. Returns (allowed, retry_after_seconds)."""
+    limit = max(rate, burst)
     with _lock:
         dq = store.get(ip)
         if dq is None:
@@ -74,7 +75,7 @@ def _check(store: dict, ip: str, rate: int, window: float, burst: int, now: floa
 
         _prune(dq, window, now)
 
-        if len(dq) >= burst:
+        if len(dq) >= limit:
             # Burst exceeded — check if also over the rate
             # The oldest request still in window tells us when we can retry
             retry_after = (dq[0] + window) - now
@@ -114,18 +115,20 @@ def check_rate_limit(ip: str, is_auth: bool = False) -> Tuple[bool, float, int, 
     now = time.time()
     if is_auth:
         allowed, retry = _check(_auth_ips, ip, _AUTH_RATE, _AUTH_WINDOW, _AUTH_BURST, now)
+        limit = max(_AUTH_RATE, _AUTH_BURST)
         with _lock:
             dq = _auth_ips.get(ip, deque())
             _prune(dq, _AUTH_WINDOW, now)
-            remaining = max(0, _AUTH_BURST - len(dq))
-        return allowed, retry, remaining, _AUTH_BURST
+            remaining = max(0, limit - len(dq))
+        return allowed, retry, remaining, limit
     else:
         allowed, retry = _check(_general_ips, ip, _GENERAL_RATE, _GENERAL_WINDOW, _GENERAL_BURST, now)
+        limit = max(_GENERAL_RATE, _GENERAL_BURST)
         with _lock:
             dq = _general_ips.get(ip, deque())
             _prune(dq, _GENERAL_WINDOW, now)
-            remaining = max(0, _GENERAL_BURST - len(dq))
-        return allowed, retry, remaining, _GENERAL_BURST
+            remaining = max(0, limit - len(dq))
+        return allowed, retry, remaining, limit
 
 def reset_ip(ip: str):
     """Reset rate limit counters for an IP (e.g., after successful login)."""

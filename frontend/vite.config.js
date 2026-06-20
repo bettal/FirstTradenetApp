@@ -9,6 +9,7 @@ const certPath = path.join(certDir, 'cert.pem');
 
 const hasCerts = fs.existsSync(keyPath) && fs.existsSync(certPath);
 const backendPort = process.env.PORT || 8000;
+const backendProtocol = hasCerts ? 'https' : 'http';
 
 export default defineConfig({
   plugins: [react()],
@@ -20,7 +21,7 @@ export default defineConfig({
     } : false,
     proxy: {
       '/api': {
-        target: `https://localhost:${backendPort}`,
+        target: `${backendProtocol}://localhost:${backendPort}`,
         changeOrigin: true,
         secure: false, // accept self-signed cert from backend
       },

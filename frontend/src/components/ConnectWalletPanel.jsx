@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import GlassInput from './GlassInput';
 import GlassButton from './GlassButton';
 import SlidePanel from './SlidePanel';
@@ -17,6 +17,18 @@ export default function ConnectWalletPanel({ open, onClose, onDone, editWallet =
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const { addToast } = useApp();
+
+  // Reset form when wallet selection changes or panel opens
+  useEffect(() => {
+    setForm({
+      name: editWallet?.name || '',
+      apiKey: editWallet?.api_key || '',
+      secretKey: '',
+      login: editWallet?.login || '',
+      password: '',
+    });
+    setError('');
+  }, [open, editWallet?.id]);
 
   const updateField = (field) => (e) => setForm(f => ({ ...f, [field]: e.target.value }));
 
@@ -68,10 +80,17 @@ export default function ConnectWalletPanel({ open, onClose, onDone, editWallet =
     <SlidePanel open={open} onClose={handleClose} title={isEdit ? 'Edit Wallet' : 'Connect Wallet'}>
       <form onSubmit={handleSubmit}>
         <GlassInput label="Wallet Name" value={form.name} onChange={updateField('name')} placeholder="e.g. Main Investment" required />
-        <GlassInput label="API Key" value={form.apiKey} onChange={updateField('apiKey')} placeholder="Enter Tradernet API Key" required />
-        <GlassInput label="Secret Key" type="password" value={form.secretKey} onChange={updateField('secretKey')} placeholder={isEdit ? 'Leave blank to keep current' : 'Enter Tradernet Secret Key'} required={!isEdit} />
-        <GlassInput label="Login (Email)" type="email" value={form.login} onChange={updateField('login')} placeholder="Your Tradernet login" />
-        <GlassInput label="Password" type="password" value={form.password} onChange={updateField('password')} placeholder="Your Tradernet password" />
+        <GlassInput label="API Key (Public Key)" value={form.apiKey} onChange={updateField('apiKey')} placeholder="Enter API public key" required />
+        <GlassInput label="Secret Key (Private Key)" type="password" value={form.secretKey} onChange={updateField('secretKey')} placeholder={isEdit ? 'Leave blank to keep current' : 'Enter API private key'} required={!isEdit} />
+
+        <div style={{ margin: '1.5rem 0 0.75rem' }}>
+          <div style={{ height: 1, background: 'var(--glass-border)', marginBottom: '1rem' }} />
+          <p className="text-dim text-xs" style={{ marginBottom: '0.75rem' }}>
+            Additional credentials (optional) — for API methods that use login/password authentication instead of key-based HMAC signing.
+          </p>
+        </div>
+        <GlassInput label="Login (Email)" type="email" value={form.login} onChange={updateField('login')} placeholder="your@email.com — optional" />
+        <GlassInput label="Password" type="password" value={form.password} onChange={updateField('password')} placeholder="Optional" />
         {error && <div className="form-error" style={{ marginBottom: '1rem' }}>{error}</div>}
         <GlassButton type="submit" disabled={saving} style={{ width: '100%' }}>
           {saving ? (isEdit ? 'Saving...' : 'Connecting...') : (isEdit ? 'Save Changes' : 'Connect Wallet')}

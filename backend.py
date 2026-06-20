@@ -14,7 +14,7 @@ import hashlib
 import struct
 import time
 import logging
-from concurrent.futures import ThreadPoolExecutor
+import threading
 import bcrypt
 import psycopg2
 import psycopg2.pool
@@ -34,6 +34,19 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# Load .env file if present (for standalone start without start.sh)
+_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+if os.path.exists(_env_path):
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith('#') and '=' in _line:
+                _k, _v = _line.split('=', 1)
+                if _k.strip() not in os.environ:
+                    os.environ[_k.strip()] = _v.strip()
+
+from email_sender import send_verification_email, send_password_reset, generate_token
+
 # Import Tradernet modules for hybrid system
 try:
     from tradernet import Tradernet as OfficialSDK
@@ -47,9 +60,6 @@ TFA_VERIFY_TIMEOUT = 300  # 5 minutes
 CSRF_TOKEN_BYTES = 32
 BRUTE_FORCE_MAX_ATTEMPTS = 5
 BRUTE_FORCE_LOCKOUT_MINUTES = 15
-
-# Thread pool for request handling (max 20 concurrent)
-executor = ThreadPoolExecutor(max_workers=20)
 
 # Session cleanup interval
 SESSION_MAX_AGE = 86400  # 24 hours
@@ -103,20 +113,7 @@ def verify_totp(secret: str, code: str, window: int = 1) -> bool:
             return True
     return False
 
-import ssl
-
 PORT = int(os.environ.get('PORT', 8000))
-
-# Load .env file if present (for standalone start without start.sh)
-_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
-if os.path.exists(_env_path):
-    with open(_env_path) as _f:
-        for _line in _f:
-            _line = _line.strip()
-            if _line and not _line.startswith('#') and '=' in _line:
-                _k, _v = _line.split('=', 1)
-                if _k.strip() not in os.environ:
-                    os.environ[_k.strip()] = _v.strip()
 
 # KMS — unified secret management (env / Vault / AWS)
 try:
@@ -157,15 +154,18 @@ def phone_hash(phone: str) -> str:
 
 # Connection pool (min 2, max 20 connections)
 db_pool = None
+_db_pool_lock = threading.Lock()
 
 def _init_db_pool():
     global db_pool
     if db_pool is None:
-        db_pool = psycopg2.pool.ThreadedConnectionPool(
-            2, 20,
-            host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
-            user=DB_USER, password=DB_PASSWORD
-        )
+        with _db_pool_lock:
+            if db_pool is None:
+                db_pool = psycopg2.pool.ThreadedConnectionPool(
+                    2, 20,
+                    host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
+                    user=DB_USER, password=DB_PASSWORD
+                )
 
 def get_db():
     """Get a database connection from the pool."""
@@ -179,7 +179,7 @@ def close_db(conn):
             db_pool.putconn(conn)
         except Exception:
             try:
-                close_db(conn)
+                conn.close()
             except Exception:
                 pass
 
@@ -244,6 +244,23 @@ def init_db():
             EXCEPTION WHEN duplicate_column THEN NULL;
             END $$;
         """)
+
+    # ── Email & admin columns ──
+    for col_name, col_def in [
+        ('email', 'TEXT'),
+        ('email_verified', 'INTEGER DEFAULT 0'),
+        ('email_verification_token', 'TEXT'),
+        ('email_verification_sent_at', 'TIMESTAMP'),
+        ('is_admin', 'INTEGER DEFAULT 0'),
+    ]:
+        c.execute(f"""
+            DO $$ BEGIN
+                ALTER TABLE users ADD COLUMN {col_name} {col_def};
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$;
+        """)
+    c.execute('CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_users_email_verification_token ON users(email_verification_token)')
     conn.commit()
     # Migrate existing plaintext phone → phone_hash
     c.execute("SELECT id, phone FROM users WHERE phone_hash IS NULL AND phone IS NOT NULL")
@@ -655,11 +672,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # SPA routing: serve index.html for non-API frontend routes
         api_prefix = self.path.startswith('/api/')
         if not api_prefix:
-            # Check if the requested file exists in static/ directory
-            import os as os_module
-            static_dir = os_module.path.join(os_module.path.dirname(os_module.path.abspath(__file__)), 'static')
-            requested_file = os_module.path.join(static_dir, self.path.lstrip('/'))
-            is_asset = os_module.path.exists(requested_file) and os_module.path.isfile(requested_file)
+            static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+            requested_file = os.path.join(static_dir, self.path.lstrip('/'))
+            is_asset = os.path.exists(requested_file) and os.path.isfile(requested_file)
 
             if not is_asset:
                 # SPA fallback: serve index.html for any frontend route
@@ -792,9 +807,43 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({'error': 'Decryption failed'}, 500)
             return
 
-        return super().do_GET()
-        if not self._check_rate_limit():
+        if self.path == '/api/profile':
+            user = self.get_user_from_session()
+            if not user:
+                self.send_json({'error': 'Unauthorized'}, 401)
+                return
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('SELECT email, email_verified, totp_enabled, is_admin FROM users WHERE id = %s', (user['id'],))
+            row = c.fetchone()
+            close_db(conn)
+            self.send_json({
+                'phone': user['phone'],
+                'email': row[0] if row else None,
+                'email_verified': bool(row[1]) if row else False,
+                'totp_enabled': user['totp_enabled'] == 1,
+                'is_admin': bool(row[3]) if row else False,
+            })
             return
+
+        if self.path.startswith('/api/profile/email/verify'):
+            token = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get('token', [None])[0]
+            if token:
+                conn = get_db()
+                c = conn.cursor()
+                c.execute(
+                    'UPDATE users SET email_verified = 1, email_verification_token = NULL WHERE email_verification_token = %s',
+                    (token,))
+                conn.commit()
+                if c.rowcount > 0:
+                    close_db(conn)
+                    self.send_json({'success': True, 'message': 'Email verified'})
+                else:
+                    close_db(conn)
+                    self.send_json({'error': 'Invalid or expired token'}, 400)
+                return
+
+        return super().do_GET()
 
     def do_POST(self):
         if not self._check_rate_limit():
@@ -867,7 +916,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if user and check_password(password, user[1]):
                 salt = user[3]
                 if user[2] == 1:
-                    # 2FA is enabled
+                    # 2FA is enabled — reset failed_attempts since password was correct
+                    _conn = get_db()
+                    _c = _conn.cursor()
+                    _c.execute('UPDATE users SET failed_attempts = 0 WHERE id = %s', (user[0],))
+                    _conn.commit()
+                    close_db(_conn)
                     self.send_json({'success': True, 'requires_2fa': True})
                 else:
                     # No 2FA, log in immediately
@@ -908,6 +962,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({'error': 'Unauthorized'}, 401)
                 return
 
+            phone = user.get('phone')
+            if phone:
+                ok, remaining = self._check_brute_force(phone)
+                if not ok:
+                    self.send_json({'error': f'Account locked. Try again in {remaining} seconds.'}, 429)
+                    return
+
             code = data.get('code')
             if not code:
                 self.send_json({'error': 'Missing 2FA code'}, 400)
@@ -925,6 +986,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     IN_MEMORY_SESSIONS[token]['2fa_verified_at'] = time.time()
                 self.send_json({'success': True, 'message': '2FA verified'})
             else:
+                if phone:
+                    self._record_failed_attempt(phone)
                 self.send_json({'error': 'Invalid code'}, 401)
 
         elif self.path == '/api/auth/setup-2fa':
@@ -985,7 +1048,151 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             else:
                 close_db(conn)
                 self.send_json({'error': 'Invalid code'}, 400)
-                
+
+        elif self.path == '/api/profile/password':
+            user = self.get_user_from_session()
+            if not user:
+                self.send_json({'error': 'Unauthorized'}, 401)
+                return
+            current_password = data.get('currentPassword')
+            new_password = data.get('newPassword')
+
+            if not current_password or not new_password:
+                self.send_json({'error': 'Current and new password required'}, 400)
+                return
+
+            from security import validate_password_strength
+            pw_error = validate_password_strength(new_password)
+            if pw_error:
+                self.send_json({'error': pw_error}, 400)
+                return
+
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('SELECT password_hash, salt FROM users WHERE id = %s', (user['id'],))
+            row = c.fetchone()
+            close_db(conn)
+
+            if not row or not check_password(current_password, row[0]):
+                self.send_json({'error': 'Current password is incorrect'}, 400)
+                return
+
+            new_hash = hash_password(new_password)
+            new_salt = os.urandom(16).hex()
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('UPDATE users SET password_hash = %s, salt = %s, session_token = NULL WHERE id = %s',
+                      (new_hash, new_salt, user['id']))
+            conn.commit()
+            close_db(conn)
+            log.info(f"User {user.get('phone')} changed password — all sessions invalidated")
+            self.send_json({'success': True, 'message': 'Password changed. Please log in again.'})
+
+        elif self.path == '/api/profile/email':
+            user = self.get_user_from_session()
+            if not user:
+                self.send_json({'error': 'Unauthorized'}, 401)
+                return
+            email = data.get('email', '').strip().lower()
+            if not email or not re.match(r'^[^\s@]+@[^\s@]+\.[^\s@]+$', email):
+                self.send_json({'error': 'Valid email required'}, 400)
+                return
+
+            token = generate_token()
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('SELECT id FROM users WHERE email = %s AND id != %s', (email, user['id']))
+            if c.fetchone():
+                close_db(conn)
+                self.send_json({'error': 'Email already in use'}, 400)
+                return
+
+            c.execute(
+                'UPDATE users SET email = %s, email_verification_token = %s, email_verification_sent_at = NOW(), email_verified = 0 WHERE id = %s',
+                (email, token, user['id']))
+            conn.commit()
+            close_db(conn)
+
+            # Determine host URL from request headers
+            host = self.headers.get('Host', f"localhost:{PORT}")
+            proto = self.headers.get('X-Forwarded-Proto', 'https')
+            host_url = f"{proto}://{host}"
+
+            send_verification_email(email, token, host_url)
+            self.send_json({'success': True, 'message': 'Verification email sent'})
+
+        elif self.path == '/api/profile/reset-2fa':
+            user = self.get_user_from_session()
+            if not user:
+                self.send_json({'error': 'Unauthorized'}, 401)
+                return
+            password = data.get('password')
+            if not password:
+                self.send_json({'error': 'Password required to reset 2FA'}, 400)
+                return
+
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('SELECT password_hash, totp_enabled FROM users WHERE id = %s', (user['id'],))
+            row = c.fetchone()
+            close_db(conn)
+
+            if not row or not check_password(password, row[0]):
+                self.send_json({'error': 'Incorrect password'}, 400)
+                return
+            if not row[1]:
+                self.send_json({'error': '2FA is not enabled'}, 400)
+                return
+
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('UPDATE users SET totp_enabled = 0, totp_secret_encrypted = NULL WHERE id = %s', (user['id'],))
+            conn.commit()
+            close_db(conn)
+            log.info(f"User {user.get('phone')} reset 2FA")
+            self.send_json({'success': True, 'message': '2FA has been reset. You can set up a new authenticator.'})
+
+        elif self.path == '/api/auth/forgot-password':
+            phone = data.get('phone')
+            if not phone:
+                self.send_json({'error': 'Phone required'}, 400)
+                return
+
+            ok, remaining = self._check_brute_force(phone)
+            if not ok:
+                self.send_json({'error': f'Account locked. Try again in {remaining} seconds.'}, 429)
+                return
+
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('SELECT id, email, email_verified FROM users WHERE phone_hash = %s', (phone_hash(phone),))
+            row = c.fetchone()
+            close_db(conn)
+
+            if not row:
+                self.send_json({'message': 'If account exists, instructions sent to email'})
+                return
+
+            uid, email, email_verified = row
+            if not email or not email_verified:
+                self.send_json({'message': 'If account exists, instructions sent to email'})
+                return
+
+            import secrets as _sec
+            new_password = _sec.token_urlsafe(12)
+            new_hash = hash_password(new_password)
+            new_salt = os.urandom(16).hex()
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('UPDATE users SET password_hash = %s, salt = %s, session_token = NULL, failed_attempts = 0, locked_until = NULL WHERE id = %s',
+                      (new_hash, new_salt, uid))
+            conn.commit()
+            close_db(conn)
+
+            send_password_reset(email, new_password)
+            log.info(f"Password reset for user {phone}")
+            self.send_json({'message': 'If account exists, instructions sent to email'})
+
         elif self.path == '/api/auth/logout':
             user = self.get_user_from_session()
             if user:
@@ -1006,7 +1213,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             cookie['session_token']['httponly'] = True
             cookie['session_token']['samesite'] = 'Strict'
             cookie['session_token']['secure'] = True
-            self.send_json({'success': True, 'message': 'Logged out'})
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Set-Cookie', cookie.output(header='', sep=''))
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'message': 'Logged out'}).encode())
 
         elif self.path == '/api/wallets':
             user = self.get_user_from_session()
@@ -1080,10 +1292,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({'error': 'Encryption key missing, please re-login'}, 401)
                 return
 
-            public_key = wallet[0]
             try:
                 f = Fernet(user['encryption_key'])
                 private_key = f.decrypt(wallet[1].encode('utf-8')).decode('utf-8')
+                # Decrypt api_key (backward compat with plaintext)
+                try:
+                    public_key = f.decrypt(wallet[0].encode('utf-8')).decode('utf-8')
+                except Exception:
+                    public_key = wallet[0]
             except Exception:
                 self.send_json({'error': 'Decryption failed'}, 500)
                 return
@@ -1130,10 +1346,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             try:
                 f = Fernet(user['encryption_key'])
                 private_key = f.decrypt(wallet[1].encode('utf-8')).decode('utf-8')
+                try:
+                    public_key = f.decrypt(wallet[0].encode('utf-8')).decode('utf-8')
+                except Exception:
+                    public_key = wallet[0]
                 
                 # Create TradeManager instance for hybrid operations
                 trade_manager = TradeManager(
-                    public_key=wallet[0],
+                    public_key=public_key,
                     private_key=private_key
                 )
                 
@@ -1200,10 +1420,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({'error': 'Encryption key missing, please re-login'}, 401)
                 return
 
-            public_key = wallet[0]
             try:
                 f = Fernet(user['encryption_key'])
                 private_key = f.decrypt(wallet[1].encode('utf-8')).decode('utf-8')
+                try:
+                    public_key = f.decrypt(wallet[0].encode('utf-8')).decode('utf-8')
+                except Exception:
+                    public_key = wallet[0]
             except Exception:
                 self.send_json({'error': 'Decryption failed'}, 500)
                 return
@@ -1286,7 +1509,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             try:
                 f = Fernet(user['encryption_key'])
                 private_key = f.decrypt(wallet[1].encode('utf-8')).decode('utf-8')
-                public_key = wallet[0]
+                try:
+                    public_key = f.decrypt(wallet[0].encode('utf-8')).decode('utf-8')
+                except Exception:
+                    public_key = wallet[0]
 
                 result = _api_auth_request(endpoint_cmd, {}, public_key, private_key)
 
@@ -1386,7 +1612,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not user:
             return True  # Let the auth check handle 401
         # Exempt auth endpoints that establish or validate sessions
-        if self.path in ('/api/auth/login', '/api/auth/register', '/api/auth/verify-2fa', '/api/auth/logout'):
+        if self.path in ('/api/auth/login', '/api/auth/register', '/api/auth/verify-2fa', '/api/auth/reverify-2fa', '/api/auth/logout', '/api/auth/forgot-password', '/api/auth/setup-2fa', '/api/auth/confirm-2fa'):
             return True
         token = self.headers.get('X-CSRF-Token', '')
         expected = user.get('csrf_token', '')
@@ -1408,7 +1634,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             attempts = (row[0] or 0) + 1
             if attempts >= BRUTE_FORCE_MAX_ATTEMPTS:
                 c.execute("UPDATE users SET failed_attempts = %s, locked_until = NOW() + interval '%s minutes' WHERE phone_hash = %s",
-                          (attempts, BRUTE_FORCE_LOCKOUT_MINUTES, phone))
+                          (attempts, BRUTE_FORCE_LOCKOUT_MINUTES, phone_hash(phone)))
             else:
                 c.execute('UPDATE users SET failed_attempts = %s WHERE phone_hash = %s', (attempts, phone_hash(phone)))
             conn.commit()
@@ -1432,7 +1658,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         now = time.time()
         last = user.get('2fa_verified_at')
         if not self._check_rate_limit():
-            return
+            return False
         if last is None or (now - last) > TFA_VERIFY_TIMEOUT:
             self.send_json({'error': '2FA verification required', 'code': '2FA_REQUIRED'}, 401)
             return False

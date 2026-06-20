@@ -4,7 +4,6 @@ import GlassButton from './GlassButton';
 
 export default function Navbar() {
   const handleAddWallet = () => window.dispatchEvent(new Event('open-add-wallet'));
-  const handleSecurity = () => window.dispatchEvent(new Event('open-security'));
 
   return (
     <nav className="navbar">
@@ -18,8 +17,8 @@ export default function Navbar() {
       <div className="navbar-actions">
         <NavLink to="/dashboard" className={({ isActive }) => `nav-link ${isActive ? 'nav-link--active' : ''}`}>Dashboard</NavLink>
         <NavLink to="/dictionaries" className={({ isActive }) => `nav-link ${isActive ? 'nav-link--active' : ''}`}>Dictionaries</NavLink>
+        <NavLink to="/profile" className={({ isActive }) => `nav-link ${isActive ? 'nav-link--active' : ''}`}>Profile</NavLink>
         <GlassButton variant="ghost" size="sm" onClick={handleAddWallet}>+ Wallet</GlassButton>
-        <GlassButton variant="ghost" size="sm" onClick={handleSecurity}>Security</GlassButton>
         <GlassButton variant="ghost" size="sm" onClick={logout}>Logout</GlassButton>
       </div>
     </nav>

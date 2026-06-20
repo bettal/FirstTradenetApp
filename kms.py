@@ -56,6 +56,12 @@ class KMSProvider(ABC):
         """Retrieve all application secrets as a dict."""
         ...
 
+    def set_secret(self, key: str, value: str):
+        """Store a secret. Not supported by all providers."""
+        raise NotImplementedError(
+            f"set_secret not implemented for {self.__class__.__name__}"
+        )
+
 # ── Environment provider (default, zero-dependency) ────────────────
 
 class EnvKMS(KMSProvider):
@@ -79,6 +85,10 @@ class EnvKMS(KMSProvider):
             if val is not None:
                 secrets[key] = val
         return secrets
+
+    def set_secret(self, key: str, value: str):
+        os.environ[key] = value
+        self._cache[key] = value
 
 # ── HashiCorp Vault provider ───────────────────────────────────────
 
@@ -137,6 +147,14 @@ class VaultKMS(KMSProvider):
             log.error(f"Vault: failed to read secrets batch: {e}")
         return secrets
 
+    def set_secret(self, key: str, value: str):
+        self._client.secrets.kv.v2.create_or_update_secret(
+            path=self._path,
+            data={key: value},
+            mount_point=self._mount,
+        )
+        self._cache[key] = value
+
 # ── AWS Secrets Manager provider ───────────────────────────────────
 
 class AWSSecretsManagerKMS(KMSProvider):
@@ -191,6 +209,15 @@ class AWSSecretsManagerKMS(KMSProvider):
             self._fetch()
         return dict(self._cache)
 
+    def set_secret(self, key: str, value: str):
+        import json as _json
+        self._fetch()
+        self._cache[key] = value
+        self._client.put_secret_value(
+            SecretId=self._secret_name,
+            SecretString=_json.dumps(self._cache),
+        )
+
 # ── Factory: choose provider ───────────────────────────────────────
 
 _provider: KMSProvider | None = None
@@ -233,6 +260,11 @@ def kms_get_or_generate(key: str) -> str:
     import base64 as _b64
     new_val = _b64.urlsafe_b64encode(os.urandom(32)).decode('utf-8')
     os.environ[key] = new_val
+    # Persist to KMS backend if supported
+    try:
+        get_kms().set_secret(key, new_val)
+    except Exception as e:
+        log.warning(f"KMS: failed to persist generated key {key}: {e}")
     log.warning(
         f"KMS: {key} not found in {os.environ.get('KMS_PROVIDER', 'env')}, "
         f"generated new value — save this for persistence!"

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useOutletContext } from 'react-router-dom';
+import { useOutletContext, useNavigate } from 'react-router-dom';
 import GlassCard from '../components/GlassCard';
 import GlassButton from '../components/GlassButton';
 import { SkeletonCard } from '../components/Skeleton';
@@ -22,6 +22,7 @@ export default function Dashboard() {
 
   const { addToast } = useApp();
   const { requireTfa } = useOutletContext();
+  const navigate = useNavigate();
 
   const loadWallets = useCallback(async () => {
     setLoading(true);
@@ -95,12 +96,9 @@ export default function Dashboard() {
     setShowExplorer(true);
   };
 
-  // Open edit wallet via Layout
+  // Open edit wallet via Layout (Layout handles 2FA verification)
   const openEditWallet = (wallet) => {
-    requireTfa(() => {
-      // Dispatch event to tell Layout to open edit panel
-      window.dispatchEvent(new CustomEvent('open-edit-wallet', { detail: wallet }));
-    });
+    window.dispatchEvent(new CustomEvent('open-edit-wallet', { detail: wallet }));
   };
 
   const renderWalletCard = (wallet) => {
@@ -172,7 +170,7 @@ export default function Dashboard() {
           <p className="text-dim" style={{ marginBottom: '1.5rem' }}>
             You must enable Two-Factor Authentication (2FA) before connecting wallets.
           </p>
-          <GlassButton onClick={() => window.dispatchEvent(new Event('open-security'))}>
+          <GlassButton onClick={() => navigate('/profile')}>
             Enable Security
           </GlassButton>
         </GlassCard>

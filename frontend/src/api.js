@@ -15,7 +15,7 @@ export function getCSRF() {
   return csrfToken;
 }
 
-export async function apiFetch(url, options = {}) {
+async function apiFetch(url, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (csrfToken && (options.method || 'GET').toUpperCase() !== 'GET') {
     headers['X-CSRF-Token'] = csrfToken;
@@ -24,16 +24,25 @@ export async function apiFetch(url, options = {}) {
   return fetch(url, { ...options, headers });
 }
 
+async function handleResponse(res, ignore401 = false) {
+  if (res.status === 401 && !ignore401) {
+    return { error: 'Unauthorized', status: 401 };
+  }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    return { ...err, status: res.status };
+  }
+  const data = await res.json().catch(() => null);
+  return data === null ? { error: 'Invalid response' } : data;
+}
+
 // ── Auth ──────────────────────────────────────────────────────────────
 export async function login(phone, password) {
   const res = await apiFetch('/api/auth/login', {
     method: 'POST',
     body: JSON.stringify({ phone, password }),
   });
-  if (!res.ok && res.status !== 200) {
-    return res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-  }
-  return res.json();
+  return handleResponse(res, true);
 }
 
 export async function register(phone, password) {
@@ -41,7 +50,7 @@ export async function register(phone, password) {
     method: 'POST',
     body: JSON.stringify({ phone, password }),
   });
-  return res.json();
+  return handleResponse(res);
 }
 
 export async function verify2FA(phone, password, code) {
@@ -49,12 +58,12 @@ export async function verify2FA(phone, password, code) {
     method: 'POST',
     body: JSON.stringify({ phone, password, code }),
   });
-  return res.json();
+  return handleResponse(res, true);
 }
 
 export async function setup2FA() {
   const res = await apiFetch('/api/auth/setup-2fa', { method: 'POST' });
-  return res.json();
+  return handleResponse(res);
 }
 
 export async function confirm2FA(code) {
@@ -62,7 +71,15 @@ export async function confirm2FA(code) {
     method: 'POST',
     body: JSON.stringify({ code }),
   });
-  return res.json();
+  return handleResponse(res);
+}
+
+export async function forgotPassword(phone) {
+  const res = await apiFetch('/api/auth/forgot-password', {
+    method: 'POST',
+    body: JSON.stringify({ phone }),
+  });
+  return handleResponse(res, true);
 }
 
 export async function reverify2FA(code) {
@@ -70,7 +87,7 @@ export async function reverify2FA(code) {
     method: 'POST',
     body: JSON.stringify({ code }),
   });
-  return res.json();
+  return handleResponse(res, true);
 }
 
 // ── Wallets ───────────────────────────────────────────────────────────
@@ -89,7 +106,7 @@ export async function createWallet({ name, apiKey, secretKey, login, password })
     method: 'POST',
     body: JSON.stringify({ name, apiKey, secretKey, login, password }),
   });
-  return res.json();
+  return handleResponse(res);
 }
 
 export async function updateWallet({ id, name, apiKey, secretKey, login, password }) {
@@ -97,7 +114,7 @@ export async function updateWallet({ id, name, apiKey, secretKey, login, passwor
     method: 'PUT',
     body: JSON.stringify({ id, name, apiKey, secretKey, login, password }),
   });
-  return res.json();
+  return handleResponse(res);
 }
 
 export async function deleteWallet(id) {
@@ -105,12 +122,47 @@ export async function deleteWallet(id) {
     method: 'DELETE',
     body: JSON.stringify({ id }),
   });
-  return res.json();
+  return handleResponse(res);
 }
 
 export async function getWalletSecret(id) {
   const res = await apiFetch(`/api/wallets/secret?id=${id}`);
-  return res.json();
+  return handleResponse(res);
+}
+
+// ── Profile ──────────────────────────────────────────────────────────
+export async function getProfile() {
+  const res = await apiFetch('/api/profile');
+  return handleResponse(res);
+}
+
+export async function changePassword(currentPassword, newPassword) {
+  const res = await apiFetch('/api/profile/password', {
+    method: 'POST',
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+  return handleResponse(res);
+}
+
+export async function setEmail(email) {
+  const res = await apiFetch('/api/profile/email', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  });
+  return handleResponse(res);
+}
+
+export async function verifyEmail(token) {
+  const res = await fetch(`/api/profile/email/verify?token=${encodeURIComponent(token)}`);
+  return handleResponse(res);
+}
+
+export async function reset2FA(password) {
+  const res = await apiFetch('/api/profile/reset-2fa', {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  });
+  return handleResponse(res);
 }
 
 // ── Dictionaries ──────────────────────────────────────────────────────
@@ -132,13 +184,13 @@ export async function refreshDictionary(code, walletId) {
     method: 'POST',
     body: JSON.stringify({ walletId: parseInt(walletId) }),
   });
-  return res.json();
+  return handleResponse(res);
 }
 
 // ── Commands & Wallet Command ─────────────────────────────────────────
 export async function getCommands() {
   const res = await apiFetch('/api/commands');
-  return res.json();
+  return handleResponse(res);
 }
 
 export async function executeWalletCommand(walletId, command, params = {}) {
@@ -146,15 +198,12 @@ export async function executeWalletCommand(walletId, command, params = {}) {
     method: 'POST',
     body: JSON.stringify({ walletId, command, params }),
   });
-  return res.json();
+  return handleResponse(res);
 }
 
 export async function logout() {
-  // Server-side session invalidation
   try {
     await apiFetch('/api/auth/logout', { method: 'POST' });
   } catch {}
-  // Clear client-side cookie
-  document.cookie = 'session_token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
   window.location.href = '/login';
 }

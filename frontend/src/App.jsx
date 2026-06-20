@@ -7,11 +7,57 @@ import ConnectWalletPanel from './components/ConnectWalletPanel';
 import SecurityPanel from './pages/SecurityPanel';
 import TfaVerifyPanel from './components/TfaVerifyPanel';
 import { useApp } from './context';
-import { getWallets } from './api';
+import { getWallets, fetchCSRF, verifyEmail } from './api';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Dictionaries from './pages/Dictionaries';
+import Profile from './pages/Profile';
+import GlassCard from './components/GlassCard';
+import GlassButton from './components/GlassButton';
 
+// ── Email Verification Page ──
+function VerifyEmailPage() {
+  const [status, setStatus] = useState('loading'); // loading | success | error
+  const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('token');
+    if (!token) { setStatus('error'); setMessage('Missing verification token'); return; }
+    verifyEmail(token).then(data => {
+      if (data.error) { setStatus('error'); setMessage(data.error); }
+      else { setStatus('success'); setMessage(data.message); }
+    }).catch(() => { setStatus('error'); setMessage('Network error'); });
+  }, []);
+
+  return (
+    <div className="page" style={{ maxWidth: 500, margin: '4rem auto', textAlign: 'center' }}>
+      <GlassCard>
+        {status === 'loading' && <p className="text-dim">Verifying your email...</p>}
+        {status === 'success' && (
+          <>
+            <h3 style={{ color: 'var(--accent)' }}>Email Verified!</h3>
+            <p className="text-dim" style={{ marginTop: '0.5rem' }}>{message}</p>
+            <GlassButton onClick={() => window.location.href = '/profile'} style={{ marginTop: '1rem' }}>
+              Go to Profile
+            </GlassButton>
+          </>
+        )}
+        {status === 'error' && (
+          <>
+            <h3 style={{ color: 'var(--danger)' }}>Verification Failed</h3>
+            <p className="text-dim" style={{ marginTop: '0.5rem' }}>{message}</p>
+            <GlassButton onClick={() => window.location.href = '/profile'} style={{ marginTop: '1rem' }}>
+              Go to Profile
+            </GlassButton>
+          </>
+        )}
+      </GlassCard>
+    </div>
+  );
+}
+
+// ── Layout ──
 function Layout() {
   const [showAddWallet, setShowAddWallet] = useState(false);
   const [showSecurity, setShowSecurity] = useState(false);
@@ -21,7 +67,6 @@ function Layout() {
   const walletsRef = useRef({ wallets: [], totpEnabled: false });
   const { addToast } = useApp();
 
-  // Load wallet info to know totpEnabled status
   const refreshWallets = useCallback(async () => {
     try {
       const data = await getWallets();
@@ -30,31 +75,32 @@ function Layout() {
   }, []);
 
   useEffect(() => { refreshWallets(); }, [refreshWallets]);
+  useEffect(() => { fetchCSRF(); }, []);
 
-  // Keep walletsRef in sync when wallets change
   useEffect(() => {
     const handler = () => refreshWallets();
     window.addEventListener('wallets-changed', handler);
     return () => window.removeEventListener('wallets-changed', handler);
   }, [refreshWallets]);
 
-  // Stable event listeners
   useEffect(() => {
     const handleAddWallet = () => {
       if (walletsRef.current.totpEnabled) {
-        setEditWallet(null);
-        setShowAddWallet(true);
+        requireTfa(() => {
+          setEditWallet(null);
+          setShowAddWallet(true);
+        });
       } else {
         addToast('Enable 2FA first', 'warning');
       }
     };
     const handleSecurity = () => setShowSecurity(true);
-
-    // Edit wallet: receive wallet data from Dashboard, open edit panel
     const handleEditWallet = (e) => {
       if (walletsRef.current.totpEnabled && e.detail) {
-        setEditWallet(e.detail);
-        setShowAddWallet(true);
+        requireTfa(() => {
+          setEditWallet(e.detail);
+          setShowAddWallet(true);
+        });
       }
     };
 
@@ -68,7 +114,6 @@ function Layout() {
     };
   }, [addToast]);
 
-  // TFA wrap: if an action needs TFA, show TFA panel, then execute on success
   const requireTfa = useCallback((action) => {
     setPendingAction(() => action);
     setShowTfa(true);
@@ -80,7 +125,6 @@ function Layout() {
   }, [pendingAction]);
 
   const handleWalletDone = useCallback(() => {
-    // Notify Dashboard to reload wallets
     window.dispatchEvent(new Event('wallets-changed'));
   }, []);
 
@@ -95,7 +139,6 @@ function Layout() {
         <Outlet context={{ requireTfa }} />
       </div>
 
-      {/* Shared panels — always mounted in Layout */}
       <ConnectWalletPanel
         open={showAddWallet}
         onClose={() => setShowAddWallet(false)}
@@ -119,7 +162,6 @@ function Layout() {
 }
 
 export default function App() {
-  // Protect against back-button after logout (bfcache restore)
   useEffect(() => {
     const handlePageShow = (event) => {
       if (event.persisted && window.location.pathname !== '/login') {
@@ -135,9 +177,11 @@ export default function App() {
       <ParticleBg />
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/verify-email" element={<VerifyEmailPage />} />
         <Route element={<Layout />}>
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/dictionaries" element={<Dictionaries />} />
+          <Route path="/profile" element={<Profile />} />
         </Route>
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>

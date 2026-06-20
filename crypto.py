@@ -113,10 +113,18 @@ def decrypt_server(value: str | None) -> str | None:
     # Check for version prefix: 'vN:' or old unversioned Fernet format
     if value.startswith('v') and ':' in value[:4]:
         ver_end = value.index(':')
-        version = int(value[1:ver_end])
+        try:
+            version = int(value[1:ver_end])
+        except ValueError:
+            log.warning(f"decrypt_server: invalid version prefix in value")
+            return None
         ciphertext = value[ver_end + 1:]
         if version == CURRENT_VERSION:
-            return _fernet.decrypt(ciphertext.encode('utf-8')).decode('utf-8')
+            try:
+                return _fernet.decrypt(ciphertext.encode('utf-8')).decode('utf-8')
+            except Exception:
+                log.warning(f"decrypt_server: failed to decrypt with current key v{version}")
+                return None
         # Try old keys
         if _old_fernet:
             try:
@@ -161,7 +169,7 @@ def rotate_keys(db_conn, new_key_raw: str) -> int:
     for uid, encrypted in cursor.fetchall():
         decrypted = decrypt_server(encrypted)
         if decrypted:
-            new_encrypted = f'v{CURRENT_VERSION or 2}:' + new_fernet.encrypt(
+            new_encrypted = f'v{CURRENT_VERSION + 1}:' + new_fernet.encrypt(
                 decrypted.encode('utf-8')
             ).decode('utf-8')
             cursor.execute(

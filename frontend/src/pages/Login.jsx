@@ -1,10 +1,12 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import GlassCard from '../components/GlassCard';
 import GlassInput from '../components/GlassInput';
 import GlassButton from '../components/GlassButton';
-import { login, register, verify2FA, fetchCSRF } from '../api';
+import { login, register, verify2FA, fetchCSRF, forgotPassword } from '../api';
 import { useApp } from '../context';
+
+const TFA_TIMEOUT = 60; // seconds (2 TOTP codes)
 
 export default function Login() {
   const [phone, setPhone] = useState('');
@@ -12,10 +14,35 @@ export default function Login() {
   const [code, setCode] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [step, setStep] = useState('auth'); // 'auth' | '2fa'
+  const [step, setStep] = useState('auth'); // 'auth' | '2fa' | 'forgot'
+  const [tfaTimer, setTfaTimer] = useState(0);
+  const [forgotPhone, setForgotPhone] = useState('');
+  const [forgotMessage, setForgotMessage] = useState('');
+  const [forgotLoading, setForgotLoading] = useState(false);
   const navigate = useNavigate();
   const { addToast } = useApp();
   const pendingAuthRef = useRef(null);
+  const tfaTimerRef = useRef(null);
+
+  // 2FA timeout countdown
+  useEffect(() => {
+    if (step === '2fa' && tfaTimer > 0) {
+      tfaTimerRef.current = setInterval(() => {
+        setTfaTimer(t => {
+          if (t <= 1) {
+            clearInterval(tfaTimerRef.current);
+            setStep('auth');
+            setCode('');
+            setError('');
+            addToast('2FA code expired. Please login again.', 'warning');
+            return 0;
+          }
+          return t - 1;
+        });
+      }, 1000);
+      return () => clearInterval(tfaTimerRef.current);
+    }
+  }, [step, tfaTimer > 0]);
 
   const handleAuth = useCallback(async (action) => {
     setError('');
@@ -31,14 +58,28 @@ export default function Login() {
         if (data.error) {
           setError(data.error);
         } else {
-          addToast('Registration successful! You can now log in.', 'success');
-          setPassword('');
+          addToast('Registration successful!', 'success');
+          // Auto-login after register
+          const loginData = await login(phone, password);
+          if (loginData.requires_2fa) {
+            pendingAuthRef.current = { phone, password };
+            setStep('2fa');
+            setCode('');
+            setError('');
+            setTfaTimer(TFA_TIMEOUT);
+          } else if (loginData.error) {
+            setError(loginData.error);
+          } else {
+            await fetchCSRF();
+            navigate('/profile', { state: { newUser: true } });
+          }
         }
       } else if (data.requires_2fa) {
         pendingAuthRef.current = { phone, password };
         setStep('2fa');
         setCode('');
         setError('');
+        setTfaTimer(TFA_TIMEOUT);
       } else if (data.error) {
         setError(data.error);
       } else {
@@ -72,6 +113,7 @@ export default function Login() {
       if (data.error) {
         setError(data.error);
       } else {
+        clearInterval(tfaTimerRef.current);
         await fetchCSRF();
         navigate('/dashboard');
       }
@@ -88,6 +130,26 @@ export default function Login() {
     handleAuth('login');
   }, [handleAuth]);
 
+  const handleForgotPassword = useCallback(async (e) => {
+    e.preventDefault();
+    if (!forgotPhone) {
+      setForgotMessage('Enter your phone number');
+      return;
+    }
+    setForgotLoading(true);
+    setForgotMessage('');
+    try {
+      const data = await forgotPassword(forgotPhone);
+      setForgotMessage(data.message || 'If account exists, instructions sent to email');
+      setForgotPhone('');
+    } catch {
+      setForgotMessage('Network error');
+    } finally {
+      setForgotLoading(false);
+    }
+  }, [forgotPhone]);
+
+  // ── 2FA Step ──
   if (step === '2fa') {
     return (
       <div className="auth-wrapper">
@@ -99,6 +161,11 @@ export default function Login() {
             </svg>
             <h2 style={{ fontSize: '1.25rem', marginBottom: '0.5rem' }}>Two-Factor Authentication</h2>
             <p className="text-dim text-sm">Enter the 6-digit code from your authenticator app.</p>
+            {tfaTimer > 0 && (
+              <p className="text-dim text-sm" style={{ marginTop: '0.5rem', color: 'var(--accent-light)' }}>
+                Time remaining: {Math.floor(tfaTimer / 60)}:{String(tfaTimer % 60).padStart(2, '0')}
+              </p>
+            )}
           </div>
           <form onSubmit={handle2FA}>
             <GlassInput
@@ -118,7 +185,7 @@ export default function Login() {
             {error && <div className="form-error text-center" style={{ marginTop: '0.75rem' }}>{error}</div>}
           </form>
           <div style={{ textAlign: 'center', marginTop: '1.5rem' }}>
-            <GlassButton variant="ghost" size="sm" onClick={() => { setStep('auth'); setCode(''); setError(''); }}>
+            <GlassButton variant="ghost" size="sm" onClick={() => { clearInterval(tfaTimerRef.current); setStep('auth'); setCode(''); setError(''); setTfaTimer(0); }}>
               Back to Login
             </GlassButton>
           </div>
@@ -127,6 +194,40 @@ export default function Login() {
     );
   }
 
+  // ── Forgot Password Step ──
+  if (step === 'forgot') {
+    return (
+      <div className="auth-wrapper">
+        <GlassCard style={{ width: '100%', maxWidth: 400, padding: '2.5rem' }}>
+          <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
+            <h2 style={{ fontSize: '1.25rem', marginBottom: '0.5rem' }}>Reset Password</h2>
+            <p className="text-dim text-sm">Enter your phone number. If your account has a verified email, a new password will be sent.</p>
+          </div>
+          <form onSubmit={handleForgotPassword}>
+            <GlassInput
+              label="Phone"
+              type="text"
+              value={forgotPhone}
+              onChange={e => setForgotPhone(e.target.value)}
+              placeholder="+1 234 567 8900 or user@mail.com"
+              autoFocus
+            />
+            <GlassButton type="submit" disabled={forgotLoading} style={{ width: '100%', marginTop: '1rem' }}>
+              {forgotLoading ? 'Sending...' : 'Reset Password'}
+            </GlassButton>
+            {forgotMessage && <p className="text-dim text-sm" style={{ textAlign: 'center', marginTop: '1rem', color: 'var(--accent-light)' }}>{forgotMessage}</p>}
+          </form>
+          <div style={{ textAlign: 'center', marginTop: '1.5rem' }}>
+            <GlassButton variant="ghost" size="sm" onClick={() => { setStep('auth'); setForgotMessage(''); }}>
+              Back to Login
+            </GlassButton>
+          </div>
+        </GlassCard>
+      </div>
+    );
+  }
+
+  // ── Auth Step (default) ──
   return (
     <div className="auth-wrapper">
       <GlassCard style={{ width: '100%', maxWidth: 400, padding: '2.5rem' }}>
@@ -164,6 +265,12 @@ export default function Login() {
             </GlassButton>
           </div>
         </form>
+
+        <div style={{ textAlign: 'center', marginTop: '1rem' }}>
+          <GlassButton variant="ghost" size="sm" onClick={() => setStep('forgot')}>
+            Forgot Password?
+          </GlassButton>
+        </div>
 
         {error && <div className="form-error text-center" style={{ marginTop: '0.75rem' }}>{error}</div>}
       </GlassCard>
